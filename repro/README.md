@@ -532,7 +532,8 @@ Four arms, all MBPP+/Qwen3-4B/L40S, all checkpointed and chained:
 | `baseline` | job 55646145 | resumed from 135/378 |
 | `latent_mas` ls=10 | job 55646144 | the method, actually switched on |
 | `latent_mas` ls=0 | job 55646146 | the released-log config; queued |
-| `text_mas` | interactive job 55646079 | ~60 s/problem → ~6 h for 378 |
+| `text_mas` | interactive job 55646079 | OOM'd at bs=15 (#14); relaunched at **bs=8**, 45.8 s/problem → ~4.7 h |
+| `latent_mas` ls=10, **bs=1** | job 55646313 | padding probe for #13, 45 problems |
 
 `text_mas` is running in the *interactive* job, which has no chain. If that job ends,
 relaunch it as a batch job — the checkpoint makes it resume:
@@ -604,6 +605,37 @@ uniform across scale or task.
 `--generate_bs 1` (no padding at all) over the same first 45 problems. If accuracy
 returns to the ~69-75% band of the other arms, padding is the cause and the
 `latent_mas` numbers at bs>1 are an artifact.
+
+### 14. TextMAS OOMs at bs=15 where LatentMAS fits — memory is a fourth currency
+
+`text_mas` died 37 minutes in, on the third agent of its second batch:
+
+```
+CUDA out of memory. Tried to allocate 1.77 GiB. GPU 0 has a total capacity of
+44.39 GiB of which 1.52 GiB is free. This process has 42.87 GiB memory in use.
+```
+
+Only 693 MiB was reserved-but-unallocated, so this is genuine exhaustion, not
+fragmentation — `expandable_segments:True` was already set and does not help.
+
+The cause is structural, and it is the same asymmetry the paper is pointing at.
+`run.py:196` passes `max_new_tokens_each=args.max_new_tokens`, so **all four**
+TextMAS agents may emit 4096 tokens each, and `text_mas.py` appends every agent's
+output text into the next agent's prompt — so agent *k* re-encodes everything agents
+1..k-1 wrote. LatentMAS carries a fixed-size KV cache instead and only the judger
+decodes, so at the same batch size it fits comfortably.
+
+**So the arms cannot share a batch size on one 48 GB card.** `text_mas` was
+relaunched at `--generate_bs 8`: peak 21 GB, no OOM. Fortunately the confound is
+small — measured per-problem wall-clock is **45.8 s at bs=8 vs 51.8 s at bs=15**, so
+the smaller batch is if anything slightly *faster* per problem and does not flatter
+LatentMAS. Per-problem token counts and accuracy are batch-size-independent anyway;
+only wall-clock is affected at all.
+
+Worth stating plainly: peak memory is a cost the paper's Token column does not
+capture either, and it is the one place LatentMAS wins by a wide, clean margin.
+
+### 15. A fix for #13
 
 A fix needs three changes together, and **must not be applied while the comparison
 arms are running** — a chained resubmit would silently pick up new code mid-run:
