@@ -1,297 +1,215 @@
-<a name="readme-top"></a>
+# LatentMAS-Explore
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.png">
-    <img alt="LatentMAS" src="assets/logo.png" width=500>
-  </picture>
-</p>
+A reproduction study of **LatentMAS** — *Latent Collaboration in Multi-Agent Systems*
+([arXiv:2511.20639](https://arxiv.org/abs/2511.20639),
+[Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS)).
 
-<h3 align="center">
-Latent Collaboration in Multi-Agent Systems
-</h3>
+This is a fork. The upstream method code is essentially unmodified; what is mine is
+everything in `repro/`, the resume support in `run.py`, and the findings below.
+The original project README is preserved verbatim at
+[`README_upstream.md`](README_upstream.md).
 
+## Purpose
 
+LatentMAS makes a specific, checkable claim: multi-agent collaboration can move out
+of token space and into the model's KV cache, buying large token savings and a
+**×3.7 wall-clock speedup** at no accuracy cost.
 
-<p align="center">
-    <a href="https://arxiv.org/abs/2511.20639"><img src="https://img.shields.io/badge/arXiv-2511.20639-B31B1B.svg?logo=arxiv" alt="Arxiv"></a>
-    <a href="https://github.com/Gen-Verse/LatentMAS/blob/main/assets/LatentMAS_slides.pdf"><img src="https://img.shields.io/badge/Slides-LatentMAS-FF6F00.svg?logo=googleslides" alt="Paper Slides"></a>
-    <a href="https://huggingface.co/papers/2511.20639"><img src="https://img.shields.io/badge/Huggingface-DailyPaper-FFD21E.svg?logo=huggingface" alt="Huggingface Paper"></a>
-    <a href="https://x.com/Jiaru_Zou/status/1994724438135169196"><img src="https://img.shields.io/badge/Coverage-LatentMAS-2176BC.svg?logo=x" alt="X"></a>
-    <a href="https://github.com/Gen-Verse/LatentMAS/tree/Science-LatentMAS"><img src="https://img.shields.io/badge/Science--LatentMAS-Branch-2D8CFF.svg?logo=github" alt="Science-LatentMAS Branch"></a>
-</p>
+I wanted to know what that claim actually rests on — so I ran it. Not to debunk it;
+to find out which parts survive contact with a GPU, and to learn how a latent-space
+agent handoff works by taking one apart. The headline result is that the mechanism
+is real and elegant, and that several of the numbers around it mean something
+narrower than they read.
 
----
+## Repository layout
 
-<p align="center">
-  <img src="assets/main_res.png" width="1000">
-</p>
+| directory | purpose |
+|---|---|
+| [`repro/`](repro/) | **Mine.** Reproduction harness, cluster scripts, and the full findings log |
+| [`repro/results/`](repro/results/) | Run outputs — distilled summaries tracked, raw logs gitignored |
+| [`repro/logs/`](repro/logs/) | Slurm and tooling logs; three tracked as evidence |
+| [`methods/`](methods/) | Upstream. The three arms: `baseline`, `text_mas`, `latent_mas` |
+| [`example_logs/`](example_logs/) | Upstream. The authors' two released logs — each is exactly one paper cell |
+| [`data/`](data/) | `medqa.json`; the other nine tasks stream from HF at runtime |
+| [`assets/`](assets/) | Upstream paper figures and slides |
 
-## 💡 Introduction
+Root-level `run.py`, `models.py`, `methods/`, `prompts.py`, `data.py`, `utils.py`
+are upstream, with the exceptions noted under Contributions.
 
+## How the method works
 
-**LatentMAS** is a multi-agent reasoning framework that **moves agent collaboration from token space into the model’s latent space**.  
-Instead of producing long textual reasoning traces, agents communicate by **passing latent thoughts** through their own **working memory**. LatentMAS has the following key features:
+Four agents — Planner → Critic → Refiner → Judger. In `latent_mas`, the first three
+**never emit a token**. Each one's prompt is forward-passed *on top of the running
+`past_key_values`*, then `latent_steps` autoregressive steps run in embedding space:
+the last layer's final hidden state is fed straight back in as `inputs_embeds`, with
+no sampling and no detokenization. The KV cache *is* the entire inter-agent channel.
+Only the judger calls `generate()`, inheriting all of it.
 
-- **Efficient** multi-step reasoning with drastically fewer tokens  
-- **Training-free** latent-space alignment for stable generation  
-- **A general technique** compatible with **any HF model** and optionally **vLLM** backends.
+The token savings fall directly out of this: three of four agents produce zero
+output tokens. `models.py:generate_latent_batch` is about forty lines and is the
+whole paper.
 
-Overall, LatentMAS achieves **superior performance**, **lower token usage**, and **major wall-clock speedups** of the multi-agent system.
+## Contributions
 
-<p align="center">
-  <img src="assets/main.png" width="1000">
-</p>
+**Made the repo run.** Two blockers stop it at import or argparse: `methods/latent_mas.py`
+imports vLLM unconditionally though `requirements.txt` has no vllm, and `run.py`'s
+`--model_name` choices list `Qwen3-4B` twice while omitting `Qwen3-8B`. Also fixed
+dependency drift — `data.py` used the legacy bare dataset id `gsm8k`, which modern
+`huggingface_hub` rejects, and transformers 5.x has removed the legacy `Cache` API
+that `_truncate_past` calls. See `repro/02_patch_blockers.sh`, `repro/00_setup_env.sh`.
 
+**Made long runs survivable.** Every GPU partition available to me is preemptible,
+and preemption here is *cancel*, not requeue — four jobs died mid-run, two of them
+past the halfway mark. `run.py` now takes `--checkpoint PATH`: a JSONL appended after
+every batch, replayed on startup as a prefix skip, carrying elapsed time forward.
+`repro/run_latentmas.sbatch` resubmits itself on SIGTERM, guarded by "did the
+checkpoint grow this attempt?" so a real crash fails once rather than twenty times.
 
-## 🔔 News
-- **[2026-05-01]** LatentMAS has been accepted into ICML 2026 as a **spotlight** ! 
-- **[2026-02-26]** 🦞 Check out [**OpenClaw-RL**](https://github.com/Gen-Verse/OpenClaw-RL) from our Gen-Verse group! OpenClaw-RL is a fully asynchronous RL framework that trains personalized AI agents directly from natural conversation feedback — no manual labels, no API keys. It introduces two learning paradigms (Binary RL via GRPO and On-Policy Distillation) and runs the entire stack on your own infrastructure. A great complement to LatentMAS's efficient multi-agent reasoning! 
-- **[2025-12-20]** Check [**Science-LatentMAS**](https://github.com/Gen-Verse/LatentMAS/tree/Science-LatentMAS), an excellent extension of LatentMAS developed by Prof. Markus J. Buehler and the [LAMM Lab](https://github.com/lamm-mit) at MIT. Science-LatentMAS is specifically designed for the scientific discovery downstream applications! For more details and instructions, please check our README section "Science-LatentMAS" below and the new `Science-LatentMAS` branch.
-- **[2025-12-15]** Check out these amazing community-driven extensions of LatentMAS!
-  - **[KNN-LatentMAS](https://github.com/Bookmaster9/kNN-latentMAS)** — Enables more efficient KV utilization for latent memory.
-  - **[Hybrid-LatentMAS](https://github.com/nhminle/LatentMAS-Hybrid)** — Extends LatentMAS to support hybrid, heterogeneous multi-agent systems.
+**Built the measurement the repo lacks.** `run.py` reports accuracy and wall-clock
+and *no token counts* — but the paper's central claim is a token claim.
+- `repro/analyze.py` re-tokenizes every agent's `[Output]` block from a stdout log
+- `repro/compare_arms.py` reads the checkpoint JSONL instead, so it works **mid-run**
+  and compares every arm on the common prefix they have all finished
+- `repro/trace_pipeline.py` narrates the KV cache growing across agents — the
+  fastest way to see the mechanism
 
-- **[2025-11-25]** We have released our paper and code implementations for LatentMAS! Stay tuned for more model-backbone supports and advanced features!
-- **[2025-11-25]** We are featured as 🤗 [**HuggingFace 1st Paper of the Day**](https://huggingface.co/papers/2511.20639)!
+### What I found
 
+**1. The two released logs are two paper cells, confirmed to the token.**
+Re-tokenizing them reproduces the paper's Token column *exactly*: 1621.2 vs 1621
+(Table 1, 14B/MBPP+), 1512.3 vs 1512 (Table 2, 14B/HumanEval+). That is not
+coincidence — these are the runs behind those cells, which pins down two things the
+paper does not state.
 
-## 🌐 Awesome Works Built on Top of LatentMAS
+**2. The Token metric counts generated text only.** Prefill is omitted: 785
+tokens/problem for the MBPP+ run, 1183 for HumanEval+. LatentMAS forward-passes
+*four* agent prompts to build its cache where a single agent passes one, and none of
+that ~4× prefill appears in the Token column. This should be stated carefully rather
+than as a refutation: prefill is parallel and far cheaper per token than sequential
+decode, so `generated + prompt` is not an apples-to-apples cost either. The paper
+measures decode tokens, which is the dominant cost and a legitimate metric. But the
+omitted prefill is exactly what resurfaces in the two places the savings don't
+materialize — wall-clock and peak memory, below.
 
-Explore community-driven extensions that expand LatentMAS into new domains, architectures, and collaboration patterns:
-
-
-### 🔬 1. **Science-LatentMAS**
-**By Prof. Markus J. Buehler & MIT LAMM Group**  
-- **New Branch:** https://github.com/Gen-Verse/LatentMAS/tree/Science-LatentMAS  
-- **Original Code:** https://github.com/lamm-mit/LatentMAS/tree/flexible_agents  
-**New Features:** Extends LatentMAS for scientific modeling and material-system collaboration, enabling flexible agent types and specialized latent communication for science domains.
-
-
-### 🧠 2. **KNN-LatentMAS**
-**By Bookmaster9**
-- **Blog (Overview):** https://bookmaster9.github.io/kNN-latentMAS/  
-- **Code:** https://github.com/Bookmaster9/kNN-latentMAS  
-- **New Features:** Introduce kNN-based latent retrieval to improve KV-cache usage, boosting memory efficiency and multi-step reasoning stability across agents.
-
-### 🤖 3. **Hybrid-LatentMAS**
-**By nhminle**
-- **Code:** https://github.com/nhminle/LatentMAS-Hybrid  
-- **New Features:** Support heterogeneous/hybrid agent collaboration (LLM + non-LLM agents), enabling modular multi-agent pipelines that mix models, tools, and reasoning strategies.
-
-
-### 🌍 4. **Awareness Network**
-**By Everest-AN**
-- **Website:** https://awareness.market/
-- **Code:** https://github.com/everest-an/Awareness-Market
-- **New Features:** A decentralized AI awareness market product built on LatentMAS research, enabling autonomous agent collaboration and memory sharing.
-
-### 🧩 5. LatentMAS-SLoRA
-**By Arifuzzaman Joy**
-- **Demo:** https://www.youtube.com/watch?v=g7sxYjwgRRk
-- **Code:** https://github.com/Arifuzzamanjoy/latent_mas_slora
-- **New Features:** Augment LatentMAS with role-specialized, dynamically switchable LoRA adapters for better specialization and adaptability.
-
-### 🛰️ 6. AVP (Agent Vector Protocol)
-**By VectorArc**
-- **Blog:** https://blog.avprotocol.ai/avp-binary-protocol-latent-agent-communication/
-- **Code:** https://github.com/VectorArc/avp-python
-- **New Features:** Enables agents to share KV-cache and hidden states instead of text, supporting zero-training latent handoff, cross-model transfer, and faster multi-agent collaboration.
-
-**If your work extends LatentMAS, feel free to open a PR and we’ll feature it here! 🚀**
-
-
-## 📊 Experiments Overview
-
-### ⭐ Main Results  
-Three main tables from our paper spanning 9 tasks across math & science reasoning, commensonse reasoning, and code generation:
-
-- **Table 1 — LatentMAS under the Sequantial MAS setting**  
-  <p align="center"><img src="assets/main_table1.png" width="1000"></p>
-
-- **Table 2 — LatentMAS under the Hierarchical MAS setting**  
-  <p align="center"><img src="assets/main_table2.png" width="1000"></p>
-
-- **Table 3 — Main Results on Reasoning Intensive Tasks**
-  <p align="center"><img src="assets/main_table3.png" width="1000"></p>
-
-
-### ⚡ Superior Efficiency on **Time and Tokens**
-
-Overall, LatentMAS reduces:
-- **~50–80% tokens**
-- **~3×–7× wall-clock time**
-compared to standard Text-MAS or chain-of-thought baselines.
-
-
-## 🛠️ Getting Started
-
-This repository provides all code for reproducing LatentMAS, TextMAS, and baseline single-agent experiments across GSM8K, AIME24/25, GPQA, ARC-Easy/Challenge, MBPP+, HumanEval+, and MedQA.
-
-### ⚙️ Setup Environment Variables
-
-We recommend setting your HF cache directory to avoid repeated downloads:
-
-```bash
-export HF_HOME=/path/to/huggingface
-export TRANSFORMERS_CACHE=$HF_HOME
-export HF_DATASETS_CACHE=$HF_HOME
-````
-
-Models and datasets will automatically be downloaded into `$HF_HOME`.
-
-
-### 📦 Install Packages
-
-```bash
-conda create -n latentmas python=3.10 -y
-conda activate latentmas
-
-pip install -r requirements.txt
-```
-
-If you want **vLLM support**, also install:
-
-```bash
-pip install vllm
-```
-
-## 🚀 Quick Start
-
-### 1. Clone the repo
-
-```bash
-git clone https://github.com/Gen-Verse/LatentMAS.git
-cd LatentMAS
-```
-
-### 2. Repository Structure
+**3. The published MBPP+/14B cell was produced with the latent channel switched off.**
+That log has `latent_steps: 0` in all 1134 trace entries, and in today's code
+`past_for_decoding = past_kv if self.latent_steps > 0 else None` — so the judger
+receives `None` and the accumulated cache is discarded. Verified live with
+`trace_pipeline.py`:
 
 ```
-LatentMAS/
-│── run.py                 # Main entry for experiments
-│── models.py              # Wrapper for HF + vLLM + latent realignment
-│── methods/
-│   ├── baseline.py        # Single-agent baseline
-│   ├── text_mas.py        # Token-space multi-agent method
-│   └── latent_mas.py      # Latent-space multi-agent (our method)
-│── prompts.py             # Prompt constructors
-│── data.py                # Dataset loaders
-│── data/                  # Provided data + figures (We give medqa.json as an example here)
-│── utils.py               # Answer parsing / timeout / helpers
-│── example_logs/          # Example logs from LatentMAS
-│── requirements.txt
+latent_steps=10                        latent_steps=0
+  Planner  KV   0 ->  166                Planner  KV   0 ->  156
+  Critic   KV 166 ->  373                Critic   KV 156 ->  353
+  Refiner  KV 373 ->  566                Refiner  KV 353 ->  536
+  Judger   inherits 566  <- channel      Judger   inherits   0  <- DISCARDED
 ```
 
+`--latent_steps` **defaults to 0**. Always pass it explicitly. (Caveat: both released
+logs print `method: muscle` and carry no `latent_steps` field at all, so they came
+from an earlier code revision; what that revision did at ls=0 is unknown.)
 
-## 🧪 Running Experiments (standard HF backend)
+**4. LatentMAS costs peak memory, and the efficiency framing omits it.** Same GPU,
+same batch size, same data, Qwen3-4B on one 24 GB A30 at bs=15: `latent_mas` OOMs
+where `baseline` and `text_mas` both run. The judger decodes against the
+concatenated KV of all three prior agents, for every one of `max_new_tokens` steps.
+This is intrinsic, not an implementation wart — it is the same property the token
+savings come from.
 
-### 🔹 **Baseline (single model)**
+**5. Wall-clock: slower than the single-agent baseline here.** The paper's own
+Table 1 agrees in direction (4B/MBPP+: 577 vs 523). **Its ×3.7 speedup is against
+TextMAS, not against a single agent** — any summary saying "LatentMAS is faster"
+without naming the comparison arm is wrong.
 
-```bash
-python run.py --method baseline --model_name Qwen/Qwen3-14B --task gsm8k --max_samples -1 --max_new_tokens 2048
-```
+**6. The latent thought is seeded from a PAD token at any `--generate_bs > 1`.**
+`generate_latent_batch` reads `hidden_states[-1][:, -1, :]` — position −1 of a
+*right-padded* batch — then builds `latent_mask = torch.ones(...)`, un-masking every
+pad already in the cache. Measured: 93.3% of sequences seed from a pad and 35.8% of
+KV positions are pad. Re-tokenizing the *released* HumanEval+ log gives 94.4% and
+32.7%, so the published numbers were produced in this state too. It is invisible at
+bs=1, which is why smoke tests miss it.
 
+### Measured results
 
-### 🔹 **TextMAS (text based multi-agent system)**
+Qwen3-4B · MBPP+ · sequential · `max_new_tokens=4096` · `think=1` · one L40S · seed 42.
+All arms on the common prefix of 45 problems they have all finished
+(`repro/results/arm_comparison.json`):
 
-```bash
-python run.py --method text_mas --model_name Qwen/Qwen3-14B --task gsm8k --prompt sequential --max_samples -1 --max_new_tokens 2048
-```
+| arm | accuracy | sec/problem | gen tok/prob | prompt tok/prob |
+|---|---|---|---|---|
+| `baseline` (single agent) | 0.778 | 25.7 | 1237 | 227 |
+| `text_mas` (bs=8) | **0.800** | 75.8 | 2203 | 4757 |
+| `latent_mas` ls=0 | 0.756 | 30.5 | 1335 | 1029 |
+| `latent_mas` ls=10, bs=15 | 0.378 | 41.6 | 926 | 1029 |
+| `latent_mas` ls=10, bs=1 | 0.556 | 30.3 | 1527 | 1029 |
 
+The token claim reproduces in direction: LatentMAS decodes 42% of TextMAS's
+generated tokens at ls=10, 61% at ls=0. The speed claim reproduces in direction but
+not magnitude — 75.8 → 41.6 s/problem is ×1.8 against TextMAS, not ×3.7 — and
+inverts against the single-agent baseline. Read the ls=10 token and speed figures
+with care: that arm is also the one whose accuracy has collapsed, and part of what
+makes it cheap is that it stops generating sooner. The accuracy does not reproduce
+at 4B — and the last two rows isolate why. Right-padding costs ~18 points (0.556 → 0.378), but bs=1
+is still 22 points under baseline, so **the latent channel itself costs more than
+the padding bug does.** Over the full 378 problems the gap widens further:
+`baseline` 0.690, `latent_mas` ls=10 0.228.
 
-### 🔹 **LatentMAS (our latent mas method)**
+Caveats worth stating: this is 4B, not the paper's 14B; `text_mas` runs at bs=8
+because it OOMs at 15; and generation is sampled at temperature 0.6, so expect
+±1–2 points run to run.
 
-```bash
-# 4B example command
-python run.py --method latent_mas --model_name Qwen/Qwen3-4B --task gsm8k --prompt sequential --max_samples -1 --max_new_tokens 2048
+## Learning steps
 
-# 8B example command
-python run.py --method latent_mas --model_name Qwen/Qwen3-8B --task gsm8k --prompt sequential --max_samples -1 --max_new_tokens 2048
+The order I would take, cheapest insight first. Each assumes `repro/00_setup_env.sh`,
+`01_fetch_assets.sh`, `02_patch_blockers.sh` have been run.
 
-# 14B example command
-python run.py --method latent_mas --model_name Qwen/Qwen3-14B --task gsm8k --prompt sequential --max_samples -1 --max_new_tokens 2048
-```
+**1. Read the mechanism before spending a GPU-hour.** `python repro/trace_pipeline.py`
+narrates the cache growing across agents. Twenty minutes with its output next to
+`models.py:generate_latent_batch` is worth more than any run.
 
-#### Notes:
+**2. Sweep `latent_steps` — the biggest open gap.** Only ls=0 and ls=10 have been
+run, and accuracy collapses between them. The sweep says whether that is monotonic
+(the channel is actively harmful at this scale) or a cliff (a bug at some length).
+`ls ∈ {1,2,5,10,20,40}`, `--max_samples 45 --generate_bs 1`, ~25 min each.
+The single most informative experiment available.
 
-* **`--latent_steps`** ∈ [0, 80]
-  Tune for best performance.
-* **`--latent_space_realign`**
-  Enables latent→embedding alignment
-  We treat this as a **hyperparameter** — enable/disable depending on task/model:
+**3. Test `--latent_space_realign`.** Completely unrun. It least-squares-solves
+`W_out @ M ≈ W_in` to map a hidden state from output space back into input-embedding
+space; without it `M` is identity, so output-space vectors are fed back as input
+embeddings. A plausible cause of the ls>0 collapse. `REALIGN=1`, paired with step 2.
 
-```bash
-python run.py --method latent_mas --model_name Qwen/Qwen3-14B --task gsm8k --prompt sequential --max_samples -1 --latent_space_realign --max_new_tokens 2048
-```
+**4. Then decide whether to fix the padding bug.** Its size is known now (~18 pts).
+A correct fix needs all three of: seed at `attention_mask.sum(-1)-1`; propagate the
+real mask into `latent_mask`; and if switching to left padding, also fix the
+`sequences[idx, prompt_len:]` slice in `generate_text_batch`, which is only correct
+under right padding. Do it on a branch — right padding is what the authors ran, so
+the unfixed path is the reproduction path.
 
+**5. Finish `text_mas` on the full 378.** It is the arm the ×3.7 speedup is measured
+against, so the headline claim stays partly untested until it does. It must run at
+bs=8, so re-run one comparison arm at bs=8 for a fair wall-clock pairing.
 
-## 📘 Example Logs
+**6. Wire up the two dead ablation flags.** `latent_only` and `sequential_info_only`
+are read by `methods/latent_mas.py` but never defined in `run.py`, so they are
+permanently False. Two `add_argument` lines make the paper's own ablations reachable.
 
-Two example LatentMAS logs are provided for reference purposes:
+Detailed findings, cluster constraints, and the full order of operations:
+**[`repro/README.md`](repro/README.md)**.
 
-* `example_logs/qwen3_14b_mbppplus_sequential.txt`
-* `example_logs/qwen3_14b_humanevalplus_hierarchical.txt`
+## Environment notes
 
+Built and run on UCI HPC3. Two constraints shaped every script here:
 
-Please refer to additional experiment logs [here](https://drive.google.com/drive/folders/1evGv5YAmLb4YM_D9Yu0ABa1nfqHC5N-l?usp=drive_link).
-You can open them to view the full agent interaction traces and outputs.
+- `~/.local/lib/python3.10/site-packages` leaks onto `sys.path` of every python3.10
+  env on this account, shadowing torch's CUDA libs — and a bare `pip install` into a
+  fresh env *uninstalls out of it*. Every script exports `PYTHONNOUSERSITE=1` and
+  `PIP_USER=0`; `00_setup_env.sh` asserts no `.local` path survives.
+- The billed `gpu`/`gpu32` partitions reject this account at the job_submit plugin,
+  so every run is preemptible. Hence the checkpoint/resume and self-chaining sbatch.
 
+`models.py` hardcodes `torch.bfloat16` — never schedule on V100 (sm_70) or
+RTX6000 (sm_75).
 
-## ⚡ vLLM Integration
+## License
 
-LatentMAS supports vLLM for faster inference.
-
-### 🔹 Baseline with vLLM
-
-```bash
-python run.py --method baseline --model_name Qwen/Qwen3-14B --task gsm8k --max_samples -1 --use_vllm --max_new_tokens 2048
-```
-
-### 🔹 TextMAS with vLLM
-
-```bash
-python run.py --method text_mas --model_name Qwen/Qwen3-14B --task gsm8k --prompt sequential --max_samples -1 --use_vllm --max_new_tokens 2048
-```
-
-### 🔹 LatentMAS with vLLM
-
-LatentMAS supports a **hybrid HF + vLLM pipeline** for fast inference:
-- vLLM handles **final text generation** (with prefix caching, tensor parallelism, etc.)
-- A HuggingFace model handles **latent-space rollout** and hidden-state alignment
-
-For this setup, we recommend using two GPUs:
-- One GPU for vLLM (`--device`, e.g., `cuda:0`)
-- One GPU for the auxiliary HF model (`--device2`, e.g., `cuda:1`)
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 python run.py --method latent_mas --model_name Qwen/Qwen3-14B --task gsm8k --prompt sequential --max_samples -1 --max_new_tokens 2048 \
-  --use_vllm \
-  --use_second_HF_model \
-  --enable_prefix_caching \
-  --device2 cuda:1
-```
-
-**📍Important Note:**
-
-> vLLM does **not** officially support modifying KV-cache or prompting via latent embeddings.
-> We modify the partial inner package inside vLLM backend for our method implementation.
-> Note minor numeric differences may arise compared to offical HF backend due to different decoding (generation) strategies. Please Use the HF backend to reproduce the official published results.
-
-## 📚 Citation
-
-💫 If you find **LatentMAS** helpful, please kindly give us a star ⭐️ and cite below. Thanks!
-
-```
-@inproceedings{
-zou2025latentmas,
-  title={Latent Collaboration in Multi-Agent Systems},
-  author={Jiaru Zou and Ruizhong Qiu and Gaotang Li and Xiyuan Yang and Katherine Tieu and Pan Lu and Ke Shen and Hanghang Tong and Yejin Choi and Jingrui He and James Zou and Mengdi Wang and Ling Yang},
-  booktitle={Forty-third International Conference on Machine Learning},
-  year={2026}
-}
-```
-
-## 🤝 Ackowledgement 
-
-This code is partially based on the amazing work of [vLLM](https://github.com/vllm-project/vllm).
+Upstream code is under the original project's license; see [`LICENSE`](LICENSE).

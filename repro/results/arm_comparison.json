@@ -1,0 +1,119 @@
+{
+  "common_prefix": 45,
+  "arms": [
+    {
+      "arm": "baseline_Qwen3-4B_mbppplus_sequential_ls0_bs15_think1",
+      "n": 45,
+      "correct": 35,
+      "accuracy": 0.7777777777777778,
+      "timed_n": 45,
+      "elapsed_sec": 1154.7342159748077,
+      "sec_per_problem": 25.660760354995727,
+      "gen_tokens_per_problem": {
+        "singleagent": 1237.2
+      },
+      "gen_tokens_total_per_problem": 1237.2,
+      "prompt_tokens_per_problem": {
+        "singleagent": 227.1
+      },
+      "prompt_tokens_total_per_problem": 227.1,
+      "latent_steps_per_problem": 0.0
+    },
+    {
+      "arm": "latent_mas_Qwen3-4B_mbppplus_sequential_ls0_bs15_think1",
+      "n": 45,
+      "correct": 34,
+      "accuracy": 0.7555555555555555,
+      "timed_n": 45,
+      "elapsed_sec": 1372.9571130275726,
+      "sec_per_problem": 30.51015806727939,
+      "gen_tokens_per_problem": {
+        "planner": 0.0,
+        "critic": 0.0,
+        "refiner": 0.0,
+        "judger": 1335.3
+      },
+      "gen_tokens_total_per_problem": 1335.3,
+      "prompt_tokens_per_problem": {
+        "planner": 222.1,
+        "critic": 263.1,
+        "refiner": 249.1,
+        "judger": 295.1
+      },
+      "prompt_tokens_total_per_problem": 1029.4,
+      "latent_steps_per_problem": 0.0
+    },
+    {
+      "arm": "latent_mas_Qwen3-4B_mbppplus_sequential_ls10_bs15_think1",
+      "n": 45,
+      "correct": 17,
+      "accuracy": 0.37777777777777777,
+      "timed_n": 45,
+      "elapsed_sec": 1871.1082317829132,
+      "sec_per_problem": 41.58018292850918,
+      "gen_tokens_per_problem": {
+        "planner": 0.0,
+        "critic": 0.0,
+        "refiner": 0.0,
+        "judger": 926.1
+      },
+      "gen_tokens_total_per_problem": 926.1,
+      "prompt_tokens_per_problem": {
+        "planner": 222.1,
+        "critic": 263.1,
+        "refiner": 249.1,
+        "judger": 295.1
+      },
+      "prompt_tokens_total_per_problem": 1029.4,
+      "latent_steps_per_problem": 30.0
+    },
+    {
+      "arm": "latent_mas_Qwen3-4B_mbppplus_sequential_ls10_bs1_think1",
+      "n": 45,
+      "correct": 25,
+      "accuracy": 0.5555555555555556,
+      "timed_n": 45,
+      "elapsed_sec": 1363.1853742599487,
+      "sec_per_problem": 30.29300831688775,
+      "gen_tokens_per_problem": {
+        "planner": 0.0,
+        "critic": 0.0,
+        "refiner": 0.0,
+        "judger": 1527.0
+      },
+      "gen_tokens_total_per_problem": 1527.0,
+      "prompt_tokens_per_problem": {
+        "planner": 222.1,
+        "critic": 263.1,
+        "refiner": 249.1,
+        "judger": 295.1
+      },
+      "prompt_tokens_total_per_problem": 1029.4,
+      "latent_steps_per_problem": 30.0
+    },
+    {
+      "arm": "text_mas_Qwen3-4B_mbppplus_sequential_ls0_bs8_think1",
+      "n": 45,
+      "correct": 36,
+      "accuracy": 0.8,
+      "timed_n": 40,
+      "elapsed_sec": 3033.5418603420258,
+      "sec_per_problem": 75.83854650855065,
+      "gen_tokens_per_problem": {
+        "planner": 728.2,
+        "critic": 543.4,
+        "refiner": 379.6,
+        "judger": 552.0
+      },
+      "gen_tokens_total_per_problem": 2203.2,
+      "prompt_tokens_per_problem": {
+        "planner": 240.1,
+        "critic": 997.4,
+        "refiner": 1555.8,
+        "judger": 1963.5
+      },
+      "prompt_tokens_total_per_problem": 4756.7,
+      "latent_steps_per_problem": 0.0
+    }
+  ]
+}

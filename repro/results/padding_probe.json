@@ -1,0 +1,41 @@
+{
+  "what": "Right-padding probe. models.py:generate_latent_batch seeds the latent thought from hidden_states[-1][:, -1, :] -- position -1 of a RIGHT-padded batch -- and then builds latent_mask=torch.ones(...), un-masking every pad already in the KV cache. Invisible at bs=1.",
+  "config": "Qwen3-4B / MBPP+ / sequential / latent_steps=10 / max_new_tokens=4096 / think=1 / L40S / seed 42",
+  "common_prefix": 45,
+  "arms": {
+    "latent_mas ls=10 bs=1  (no padding possible)": {
+      "n": 45,
+      "correct": 25,
+      "accuracy": 0.5556
+    },
+    "latent_mas ls=10 bs=15 (heavy padding)": {
+      "n": 45,
+      "correct": 17,
+      "accuracy": 0.3778
+    },
+    "latent_mas ls=0  bs=15 (channel off)": {
+      "n": 45,
+      "correct": 34,
+      "accuracy": 0.7556
+    },
+    "baseline        bs=15": {
+      "n": 45,
+      "correct": 35,
+      "accuracy": 0.7778
+    },
+    "text_mas        bs=8": {
+      "n": 45,
+      "correct": 36,
+      "accuracy": 0.8
+    }
+  },
+  "measured_pad_contamination": {
+    "seqs_seeded_from_a_pad_token": 0.933,
+    "kv_positions_that_are_pad": 0.358,
+    "released_humanevalplus_log_same_metrics": {
+      "seqs_seeded_from_a_pad_token": 0.944,
+      "kv_positions_that_are_pad": 0.327
+    }
+  },
+  "conclusion": "Padding costs ~18 accuracy points (55.6 -> 37.8). But bs=1 is still 22 points under the single-agent baseline on the same 45 problems, so the latent channel itself costs more than padding does. Fixing padding does not rescue the arm."
+}
