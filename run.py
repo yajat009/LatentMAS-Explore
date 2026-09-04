@@ -147,6 +147,19 @@ def main():
     parser.add_argument("--text_mas_context_length", type=int, default=-1, help="TextMAS context length limit")
     parser.add_argument("--think", action="store_true", help="Manually add think token in the prompt for LatentMAS")
     parser.add_argument("--latent_space_realign", action="store_true")
+    # Ablations from the paper. methods/latent_mas.py has always read these via
+    # getattr(args, ..., False), but run.py never defined them, so they were
+    # unreachable -- permanently False on every run ever made with this repo.
+    #   --sequential_info_only : after each agent, keep only the KV that agent
+    #       added and drop everything earlier, so the channel carries one hop
+    #       instead of the full accumulated history.
+    #   --latent_only          : keep only the `latent_steps` silent-thought
+    #       entries, dropping the agent's own prompt KV as well. Implies
+    #       --sequential_info_only (methods/latent_mas.py:46).
+    parser.add_argument("--sequential_info_only", action="store_true",
+                        help="Ablation: carry only the most recent agent's KV forward, not the accumulation.")
+    parser.add_argument("--latent_only", action="store_true",
+                        help="Ablation: carry only the latent-thought KV entries forward. Implies --sequential_info_only.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="JSONL file of completed problems. Written after every batch and "
