@@ -13,6 +13,9 @@ repro/results/*
 !repro/results/padding_probe.json
 !repro/results/summary.json
 !repro/results/reference_summary.json
+!repro/results/ls_sweep.json
+!repro/results/realign_check_*.json
+!repro/results/padfix_comparison.json
 !repro/logs/README.md
 !repro/logs/analyze_reference.log
 !repro/logs/trace_latent_ls0.log
