@@ -67,6 +67,12 @@ latent_steps=10                        latent_steps=0
 
 Everything in `yajat/` is new. Upstream files were changed only where noted.
 
+**Layout.** The upstream method code (`run.py`, `models.py`, `prompts.py`, `data.py`,
+`utils.py`, `methods/`) lives in **`architecture/`**; run it as
+`python architecture/run.py ...`. `yajat/` holds the reproduction harness and findings.
+`data/`, `assets/`, `example_logs/` are upstream data. Root carries only `README.md`,
+`LICENSE`, `requirements.txt`, `.gitignore`.
+
 ### 1. Fixes required to make the repo run at all
 
 | file | change |

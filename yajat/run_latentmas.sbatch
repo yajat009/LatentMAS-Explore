@@ -125,7 +125,7 @@ echo "=== $TAG (attempt ${SLURM_RESTART_COUNT:-0}) ==="
 if [ -f "$CKPT" ]; then echo "resuming from $(wc -l < "$CKPT") completed problems in $CKPT"; fi
 
 set +e
-"$PY_BIN" -u run.py \
+"$PY_BIN" -u architecture/run.py \
   --method "$METHOD" \
   --model_name "$MODEL" \
   --task "$TASK" \
