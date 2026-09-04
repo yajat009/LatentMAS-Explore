@@ -1,0 +1,94 @@
+{
+  "common_prefix": 45,
+  "rows": [
+    {
+      "latent_steps": 0,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 37,
+      "accuracy": 0.8222,
+      "sec_per_problem": 32.52,
+      "judger_chars_mean": 6200.1,
+      "empty_predictions": 4
+    },
+    {
+      "latent_steps": 1,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 35,
+      "accuracy": 0.7778,
+      "sec_per_problem": 33.43,
+      "judger_chars_mean": 5441.2,
+      "empty_predictions": 7
+    },
+    {
+      "latent_steps": 2,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 35,
+      "accuracy": 0.7778,
+      "sec_per_problem": 26.53,
+      "judger_chars_mean": 5085.0,
+      "empty_predictions": 5
+    },
+    {
+      "latent_steps": 5,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 29,
+      "accuracy": 0.6444,
+      "sec_per_problem": 32.03,
+      "judger_chars_mean": 5899.6,
+      "empty_predictions": 9
+    },
+    {
+      "latent_steps": 10,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 25,
+      "accuracy": 0.5556,
+      "sec_per_problem": 30.29,
+      "judger_chars_mean": 5612.1,
+      "empty_predictions": 7
+    },
+    {
+      "latent_steps": 20,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 24,
+      "accuracy": 0.5333,
+      "sec_per_problem": 31.85,
+      "judger_chars_mean": 4834.5,
+      "empty_predictions": 7
+    },
+    {
+      "latent_steps": 40,
+      "realign": false,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 24,
+      "accuracy": 0.5333,
+      "sec_per_problem": 31.27,
+      "judger_chars_mean": 5269.2,
+      "empty_predictions": 10
+    },
+    {
+      "latent_steps": 10,
+      "realign": true,
+      "n": 45,
+      "n_finished": 45,
+      "correct": 23,
+      "accuracy": 0.5111,
+      "sec_per_problem": 33.11,
+      "judger_chars_mean": 5726.8,
+      "empty_predictions": 12
+    }
+  ],
+  "shape_verdict": "MONOTONIC -- the 0.289 decline is spread across steps, no single cliff. Suggests the latent channel is genuinely harmful at this scale."
+}
