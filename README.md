@@ -9,11 +9,24 @@ the model's KV cache, buying large token savings and a **×3.7 wall-clock speedu
 no accuracy cost**. This fork runs that claim on real hardware and reports what
 survives.
 
-**Headline: the method requires model scale the paper never states as a condition.**
-At Qwen3-14B the latent channel is essentially free (0.911 with it on vs 0.933 off —
-one problem in 45). At Qwen3-4B, on identical code, task, prompt and GPU, the same
-setting costs **27 accuracy points**. And even where it works, the efficiency claim is
-smaller than advertised: ×2.1 wall clock and ×1.4 generated tokens vs TextMAS, not ×3.7.
+**Scope — read this first.** The paper's speedup table covers **AIME24, AIME25 and
+GPQA-Diamond at Qwen3-8B and 14B**. Most of the work here is MBPP+ at **Qwen3-4B**,
+which is *outside* that range on both axes. So these results do not refute the paper's
+headline; they map its edges. Two findings follow:
+
+1. **The floor is between 4B and 14B.** At 14B the latent channel is free (0.911 with
+   it on vs 0.933 off — one problem in 45). At 4B, identical code/task/prompt/GPU, it
+   costs **27 accuracy points** and the model's output collapses into degenerate
+   repetition in 25.8% of problems (0.0% at 14B). The paper never claims 4B; this
+   locates where the method stops working, which was not previously documented.
+2. **The ×3.7 cannot be reproduced on MBPP+, for a structural reason.** The saving
+   comes from silencing three agents, so it scales with how verbose those agents would
+   have been. TextMAS spends ~38,600 tokens on an AIME24 problem and ~2,200 on an
+   MBPP+ problem — **17× less to save**. Measured on MBPP+/4B: ×2.32 wall clock, ×1.39
+   tokens. That is the right answer for this task, not a failed reproduction.
+
+A GPQA-Diamond / 14B / three-arm run — the configuration the paper actually claims —
+is in flight. Until it lands, nothing here tests the headline claim directly.
 
 ---
 
@@ -148,7 +161,9 @@ Data: `repro/results/scale_2x2.json`.
 result of the reproduction. It also matches the authors' own released 14B log run at
 ls=10 (84.8% on HumanEval+) — the method does work, at 14B.
 
-The paper does not state a scale requirement. On this evidence there is one.
+The paper's tables start at 8B, so it never claims 4B works — this is not a
+contradiction of the paper but a measurement of where the method's floor sits, which
+the paper does not report.
 
 **And at 14B the channel does pay — modestly.** Turning it on cuts generated tokens
 7.2% (1299.4 → from 1400.3) and wall clock 3.8% (61.1 vs 63.5 s/problem) at
@@ -171,6 +186,37 @@ at 14B.
 **Monotonic, no cliff.** The 0.289 decline is spread evenly across steps, which
 points at the latent channel being genuinely harmful at this scale rather than
 broken by a single bug. More latent thinking is strictly worse, every step of the way.
+
+### How 4B fails: degenerate repetition
+
+The 4B collapse is not an extraction or plumbing bug — it is the model's output
+falling into a repetition loop:
+
+```
+...and_and and__and and and_and and__and andand andandandand and and_and and_ and_re
+and and and and_and and__and and_ and_and and__and and__and and_ and__and...
+```
+
+Measured over every finished problem in each arm ("degenerate tail" = fewer than 15%
+unique words in the last 400):
+
+| arm | accuracy | degenerate tail | unclosed `<think>` | empty prediction |
+|---|---|---|---|---|
+| 4B `latent_mas` ls=10 | 0.282 | **25.8%** | 48.9% | 31.8% |
+| 4B `text_mas` | 0.722 | 0.9% | 29.6% | 2.6% |
+| 4B `baseline` | 0.690 | 0.6% | 11.9% | 13.0% |
+| **14B `latent_mas` ls=10** | **0.911** | **0.0%** | 4.4% | 4.4% |
+
+**This rules out a harness bug and evidences the mechanism.** Same code, same
+extractor, same prompts: TextMAS degenerates 0.9% of the time and 14B LatentMAS 0.0%.
+Only the 4B latent arm collapses. Degenerate repetition is the standard signature of a
+residual stream drifting off-distribution — the model loses varied continuations and
+falls into a fixed point — which is exactly what feeding `hᴸ` back with no projection
+onto the embedding manifold predicts.
+
+One genuine but minor defect surfaced in the same audit: 6 of 280 problems (2.1%) have
+code after `</think>` that the extractor misses. Real, worth fixing, far too small to
+explain anything.
 
 ### Five-arm comparison — 45 problems
 
@@ -250,9 +296,32 @@ comparison arm is wrong.
 
 ## Why these numbers differ from the paper
 
-**Measured: model scale.** The 2×2 above settles this. The latent channel costs 27
-points at 4B and nothing at 14B, with every other variable held fixed. That is not an
-inference from the authors' logs — it is a controlled comparison in this repo.
+**First: we tested outside the paper's claimed range.** Its speedup table covers
+AIME24/AIME25/GPQA-Diamond at 8B and 14B. Most work here is MBPP+ at 4B. Both axes
+differ, so a gap was expected and most of it is explained below without any appeal to
+error on either side.
+
+**Task verbosity explains the speedup gap.** The saving comes from silencing three
+agents, so its size is set by how much those agents would otherwise say:
+
+| task / model | TextMAS tok | LatentMAS tok | reduction |
+|---|---|---|---|
+| AIME24 / 8B (paper) | 38,596 | 8,953 | 76.8% |
+| AIME25 / 8B (paper) | 45,088 | 8,699 | 80.7% |
+| GPQA-D / 14B (paper) | 20,931 | 3,606 | 82.8% |
+| **MBPP+ / 4B (here)** | **2,191** | **1,575** | **28%** |
+
+TextMAS is ~17× more verbose on AIME24 than on MBPP+. There is simply far less to save
+on an easy code task, so ×3.7 is unreachable there by construction.
+
+**Confirmed, not contradicted: LatentMAS is slower than a single agent.** Reading the
+paper's Speed column as time (2808/688 = ×4.08 = its ×4.1), Single → LatentMAS goes
+421 → 688, 450 → 820, 1018 → 1149, 1040 → 1473: **slower in 11 of 12 cells.** Our
+MBPP+ measurement (44.5 vs 29.0 s/problem) agrees with the paper's own data.
+
+**Measured: model scale.** The 2×2 above is a controlled comparison — 27 points at 4B,
+nothing at 14B, every other variable fixed. Since the paper's tables start at 8B, this
+maps the method's floor rather than disputing a claim.
 
 **Why scale should matter (mechanism — inferred, not proven).** The method replaces
 the sampled token with the raw last-layer hidden state. The token is not only a
