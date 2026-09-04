@@ -9,25 +9,36 @@ the model's KV cache, buying large token savings and a **×3.7 wall-clock speedu
 no accuracy cost**. This fork runs that claim on real hardware and reports what
 survives.
 
-**Scope — read this first.** The paper's speedup table covers **AIME24, AIME25 and
-GPQA-Diamond at Qwen3-8B and 14B**. Most of the work here is MBPP+ at **Qwen3-4B**,
-which is *outside* that range on both axes. So these results do not refute the paper's
-headline; they map its edges. Two findings follow:
+**Headline: we do not reproduce the paper's Qwen3-4B / MBPP+ cell.** The paper's
+Table 1 reports LatentMAS at **73.5%** accuracy with a **×3.7** speedup in exactly our
+configuration (Qwen3-4B, MBPP+, sequential, 4096 max tokens, temp 0.6, top-p 0.95).
+We measure **22.8%** at bs=15 and **55.6%** at bs=1. That is a real, unexplained gap
+of 18–51 points, and this repo is an attempt to account for it.
 
-1. **The floor is between 4B and 14B.** At 14B the latent channel is free (0.911 with
-   it on vs 0.933 off — one problem in 45). At 4B, identical code/task/prompt/GPU, it
-   costs **27 accuracy points** and the model's output collapses into degenerate
-   repetition in 25.8% of problems (0.0% at 14B). The paper never claims 4B; this
-   locates where the method stops working, which was not previously documented.
-2. **The ×3.7 cannot be reproduced on MBPP+, for a structural reason.** The saving
-   comes from silencing three agents, so it scales with how verbose those agents would
-   have been. TextMAS spends ~38,600 tokens on an AIME24 problem and ~2,200 on an
-   MBPP+ problem — **17× less to save**. Measured on MBPP+/4B: ×2.32 wall clock, ×1.39
-   tokens. That is the right answer for this task, not a failed reproduction.
+What we can account for so far:
 
-A GPQA-Diamond / 14B / three-arm run — the configuration the paper actually claims —
-is in flight. Until it lands, nothing here tests the headline claim directly.
+| factor | effect | status |
+|---|---|---|
+| right-padding bug at bs>1 | +32.8 pts (0.228 → 0.556) | measured |
+| model scale | channel free at 14B (0.911), fatal at 4B | measured |
+| `--latent_steps` defaults to **0** | disables the channel entirely | measured |
+| `--latent_space_realign` defaults **off** | paper always uses `Wa`; code substitutes identity | **see below** |
+| `--think` appends a literal `<think>` | 48.9% never close it; 31.8% empty predictions | untested |
 
+**A concrete paper↔code discrepancy.** Section 3.1 of the paper states the alignment
+matrix `Wa` is computed once per run and "reuse[d] across all inference steps", and
+Figure 7 reports it worth +2.3%–5.3% accuracy. But `run.py` declares
+`--latent_space_realign` as `action="store_true"` — **default off** — and
+`_build_latent_realign_matrix` then discards the solved matrix for `torch.eye(...)`.
+So the released code does not run the paper's method by default. (At Qwen3-4B this is
+moot — tied embeddings make `Wa` reduce to a scalar, which the code's norm rescale
+already applies — but at 14B, where embeddings are untied, `Wa` is a real
+near-orthogonal transform that is skipped unless the flag is passed.)
+
+**One contradiction we cannot yet explain.** Paper Figure 8 reports accuracy rising
+with latent depth, peaking at 40–80 steps. Our 4B sweep at bs=1 declines monotonically
+across the same range (0.822 → 0.533 by ls=40). Figure 8 is measured on Qwen3-14B, so
+the 4B optimum is not actually published — but the directions disagree.
 ---
 
 ## How the method works
@@ -296,23 +307,23 @@ comparison arm is wrong.
 
 ## Why these numbers differ from the paper
 
-**First: we tested outside the paper's claimed range.** Its speedup table covers
-AIME24/AIME25/GPQA-Diamond at 8B and 14B. Most work here is MBPP+ at 4B. Both axes
-differ, so a gap was expected and most of it is explained below without any appeal to
-error on either side.
+**Retracted:** an earlier version of this README claimed the paper's tables start at
+8B and therefore never cover 4B. That was wrong. Table 1 covers Qwen3-4B on six tasks
+including MBPP+, and reports LatentMAS at 73.5% / ×3.7 in our exact configuration.
+The AIME/GPQA table (Table 2) is 8B/14B only, which is what that claim confused it with.
 
-**Task verbosity explains the speedup gap.** The saving comes from silencing three
-agents, so its size is set by how much those agents would otherwise say:
+**Task verbosity still explains the speedup gap.** The saving scales with how much the
+silenced agents would otherwise say:
 
 | task / model | TextMAS tok | LatentMAS tok | reduction |
 |---|---|---|---|
 | AIME24 / 8B (paper) | 38,596 | 8,953 | 76.8% |
-| AIME25 / 8B (paper) | 45,088 | 8,699 | 80.7% |
-| GPQA-D / 14B (paper) | 20,931 | 3,606 | 82.8% |
+| MBPP+ / 4B (paper) | 4,420 | 1,339 | 69.7% |
 | **MBPP+ / 4B (here)** | **2,191** | **1,575** | **28%** |
 
-TextMAS is ~17× more verbose on AIME24 than on MBPP+. There is simply far less to save
-on an easy code task, so ×3.7 is unreachable there by construction.
+Note our TextMAS emits 2,191 tokens where the paper's emits 4,420 — our TextMAS is
+half as verbose, so there is half as much to save. That is itself unexplained and is a
+lead worth chasing: same task, same model, same max-token budget.
 
 **Confirmed, not contradicted: LatentMAS is slower than a single agent.** Reading the
 paper's Speed column as time (2808/688 = ×4.08 = its ×4.1), Single → LatentMAS goes

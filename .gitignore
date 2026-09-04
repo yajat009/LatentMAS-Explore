@@ -25,3 +25,12 @@ yajat/results/*
 # Compatibility symlink repro -> yajat, kept only while jobs submitted under
 # the old path are still in flight. Not part of the tree.
 /repro
+
+# Backward-compat symlinks into architecture/, kept only while jobs submitted
+# under the old flat layout are still in flight. Not part of the tree.
+/run.py
+/models.py
+/prompts.py
+/data.py
+/utils.py
+/methods
