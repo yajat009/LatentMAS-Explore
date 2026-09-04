@@ -9,9 +9,11 @@ the model's KV cache, buying large token savings and a **×3.7 wall-clock speedu
 no accuracy cost**. This fork runs that claim on real hardware and reports what
 survives.
 
-**Headline: at Qwen3-4B on MBPP+, it does not reproduce.** The speedup is ×2.1 in
-wall clock and ×1.4 in generated tokens, not ×3.7, and accuracy collapses by ~50
-points. Full numbers below.
+**Headline: the method requires model scale the paper never states as a condition.**
+At Qwen3-14B the latent channel is essentially free (0.911 with it on vs 0.933 off —
+one problem in 45). At Qwen3-4B, on identical code, task, prompt and GPU, the same
+setting costs **27 accuracy points**. And even where it works, the efficiency claim is
+smaller than advertised: ×2.1 wall clock and ×1.4 generated tokens vs TextMAS, not ×3.7.
 
 ---
 
@@ -89,20 +91,21 @@ checkpoint grow this attempt?" so a real crash fails once, not twenty times), pl
 
 ## Results
 
-Qwen3-4B · MBPP+ · sequential · `max_new_tokens=4096` · `think=1` · one L40S · seed 42.
+MBPP+ · sequential · `max_new_tokens=4096` · `think=1` · one L40S · seed 42.
+Qwen3-4B unless stated; the scale table below adds Qwen3-14B.
 
-### Main comparison — 336 problems
+### Main comparison — all 378 problems
 
-The three arms that ran to full length (`repro/results/arm_comparison.json`):
+All three arms complete (`repro/results/arm_comparison.json`):
 
 | arm | accuracy | sec/problem | gen tok/prob | prompt tok/prob |
 |---|---|---|---|---|
-| `baseline` (single agent, bs=15) | 0.694 | 29.1 | 1416 | 245 |
-| `latent_mas` ls=10, bs=15 | **0.226** | 44.7 | 1551 | 1102 |
-| `text_mas` bs=8 | **0.723** | 95.4 | 2158 | 5148 |
+| `baseline` (single agent, bs=15) | 0.691 | 29.0 | 1430 | 243 |
+| `latent_mas` ls=10, bs=15 | **0.228** | 44.5 | 1578 | 1092 |
+| `text_mas` bs=8 | **0.722** | 93.1 | 2154 | 5119 |
 
-**TextMAS beats LatentMAS by ~50 accuracy points.** LatentMAS is cheaper — ×2.13 in
-wall clock, ×1.39 in generated tokens — but neither figure is the claimed ×3.7.
+**TextMAS beats LatentMAS by ~49 accuracy points.** LatentMAS is cheaper — ×2.09 in
+wall clock, ×1.37 in generated tokens — but neither figure is the claimed ×3.7.
 
 **LatentMAS also loses to the plain single-agent baseline on every axis at once:**
 lower accuracy, 1.5× slower, 4.5× the prefill. There is no dimension on which it
@@ -110,9 +113,30 @@ wins here. TextMAS beats the baseline by only 2.9 points for 3.3× the wall cloc
 
 > **The wall-clock ratio is confounded.** LatentMAS ran 15 problems at a time,
 > TextMAS only 8 (TextMAS OOMs at 15). A bigger batch lowers time-per-problem on its
-> own, because fixed GPU overhead is shared across more work — so part of the ×2.13
-> is batch size, not method. The **token** ratio (×1.39) is batch-independent and is
-> the trustworthy one. A matched `latent_mas` bs=8 run is queued to decontaminate this.
+> own, because fixed GPU overhead is shared across more work — so part of the ×2.09
+> is batch size, not method. The **token** ratio (×1.37) is batch-independent and is
+> the trustworthy one. A matched `latent_mas` bs=8 run is in flight to decontaminate this.
+
+### Scale — the decisive experiment
+
+Same code, same task, same prompt, same L40S, `bs=1` (no padding artifact), 45
+problems. The only variable is model size:
+
+| | **ls=0** (channel off) | **ls=10** (channel on) | cost of the channel |
+|---|---|---|---|
+| **Qwen3-4B** | 0.822 | **0.556** | **−26.6 pts** |
+| **Qwen3-14B** | 0.933 | **0.911** | **−2.2 pts** (one problem) |
+
+**At 14B the latent channel is free; at 4B it is catastrophic.** This is the central
+result of the reproduction. It also matches the authors' own released 14B log run at
+ls=10 (84.8% on HumanEval+) — the method does work, at 14B.
+
+The paper does not state a scale requirement. On this evidence there is one.
+
+Caveat: 45 problems carries roughly ±7 points of sampling error, so the 4B→14B gap
+(27 points) is solid but the within-14B gap (2.2 points, one problem) is not
+distinguishable from zero — which is the point: the channel costs nothing measurable
+at 14B.
 
 ### `latent_steps` sweep — 45 problems, bs=1
 
@@ -163,9 +187,11 @@ That log carries `latent_steps: 0` in all 1134 trace entries, and in today's cod
 `past_for_decoding = past_kv if self.latent_steps > 0 else None` — the judger gets
 `None` and the accumulated cache is discarded, degenerating to a single-agent call
 with three wasted forward passes. **`--latent_steps` defaults to 0; always pass it
-explicitly.** Caveat: both released logs print `method: muscle` and carry no
-`latent_steps` field at all, so they came from an earlier code revision, and what
-that revision did at ls=0 is unknown.
+explicitly.** The two logs differ here, which is easy to miss: neither arg namespace
+has a `latent_steps` field, but each log's per-agent `[Latent Steps]` marker carries
+the value — **0** in all 1134 MBPP+ entries, **10** in all 492 HumanEval+ entries. So
+only the HumanEval+ cell exercised the channel. It also prints `method: muscle` where
+the MBPP+ log prints `latent_mas`, so at least one predates the released `run.py`.
 
 **4. LatentMAS costs peak memory, and the efficiency framing omits it.** Same GPU,
 same batch, same data, Qwen3-4B on one 24 GB A30 at bs=15: `latent_mas` OOMs where
@@ -198,24 +224,56 @@ comparison arm is wrong.
 
 ---
 
-## Why these numbers may differ from the paper
+## Why these numbers differ from the paper
 
-Ranked by how much of the gap each could plausibly explain:
+**Measured: model scale.** The 2×2 above settles this. The latent channel costs 27
+points at 4B and nothing at 14B, with every other variable held fixed. That is not an
+inference from the authors' logs — it is a controlled comparison in this repo.
 
-1. **Model scale.** This is Qwen3-4B; the paper's cells are 14B (and larger). The
-   latent channel asks the model to consume its own hidden states as input
-   embeddings — plausibly a capability that only appears above some scale. The
-   monotonic sweep is consistent with "4B cannot use this channel at all."
-2. **Tied embeddings at 4B.** Per finding 6, `--latent_space_realign` is inert at
-   4B, so there is no way to map output-space vectors into the input slot. At 14B the
-   flag is a real transform. 4B may be structurally unable to run the method as intended.
-3. **Code revision drift.** Both released logs print `method: muscle` and have no
-   `latent_steps` field, so they predate the released `run.py`. Matching flags does
-   not guarantee matching behavior.
-4. **The padding bug** (~18 points) — real, but present in the authors' runs too, so
-   it explains our absolute numbers, not the gap to theirs.
-5. **Sampling noise** — temperature 0.6, seed 42; ±1–2 points run to run. Far too
-   small to matter here.
+**Why scale should matter (mechanism — inferred, not proven).** The method replaces
+the sampled token with the raw last-layer hidden state. The token is not only a
+bottleneck; it is a *projection back onto the training distribution* — sampling lands
+you exactly on one of the ~150k rows of `W_in`, discarding accumulated drift at every
+step. Feed `hᴸ` back directly and that snap never happens, so the loop has no error
+correction anywhere in it and drift compounds. The sweep's shape is the fingerprint:
+a smooth decline that **plateaus at 0.533** once the state has fully decohered, rather
+than a cliff (which would indicate a bug) or unbounded decay. A larger model plausibly
+has a wider basin — 14B carries 5120 dimensions against 4B's 2560 for a similarly sized
+vocabulary, so features sit closer to orthogonal and a perturbed vector stays nearer
+what it started as. **This last step is the least certain claim here**: the data show
+*that* scale rescues the method, not *why*. See "open" below for the test.
+
+**Not the explanation — `--latent_space_realign`.** Tempting, but wrong. The flag is
+inert at 4B (tied embeddings make the least-squares solve return the identity exactly;
+`M_vs_I_relative_fro = 0.0`) and a real near-orthogonal transform at 14B. But it
+**defaults to off on both**, and `_build_latent_realign_matrix` then overwrites `M`
+with `torch.eye(...)`. So both models fed back raw `hᴸ` with only a norm rescale.
+Realignment does not distinguish our runs from theirs.
+
+**Secondary, unresolved: task and prompt.** The authors' one released log with the
+channel genuinely on is HumanEval+/*hierarchical*; we ran MBPP+/*sequential*. Our 4B↔14B
+comparison is internally clean, so this does not threaten the scale result — but it is
+not ruled out as an additional factor.
+
+**Code revision drift.** The HumanEval+ log prints `method: muscle` and the MBPP+ log
+prints `latent_mas`; neither arg namespace has a `latent_steps` field (the value comes
+from each log's per-agent `[Latent Steps]` marker). So at least one predates the
+released `run.py`, and matching flags does not guarantee matching behavior.
+
+**Not a factor: the padding bug.** Real (~18 points) but present in the authors' runs
+too — 94.4% pad-seeded in their released HumanEval+ log. It moves our absolute numbers,
+not the gap to theirs.
+
+**Not a factor: sampling noise.** Temperature 0.6, seed 42; ±1–2 points run to run.
+
+### Open
+
+The drift account above is measurable and currently untested. Instrument the latent
+loop to record, at each step, the **maximum cosine similarity between the latent vector
+and any row of `W_in`** — i.e. how close the state stays to any real token embedding.
+If it decays fast at 4B and holds at 14B, drift is confirmed and the mechanism is
+established rather than inferred. One forward pass per step, no generation, minutes per
+model; it belongs in `repro/trace_pipeline.py`, which already walks the loop.
 
 ---
 
