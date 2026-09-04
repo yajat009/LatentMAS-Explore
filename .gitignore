@@ -14,6 +14,7 @@ repro/results/*
 !repro/results/summary.json
 !repro/results/reference_summary.json
 !repro/results/ls_sweep.json
+!repro/results/scale_2x2.json
 !repro/results/realign_check_*.json
 !repro/results/padfix_comparison.json
 !repro/logs/README.md

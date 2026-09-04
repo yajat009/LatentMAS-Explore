@@ -1,0 +1,70 @@
+{
+  "what": "Decisive scale experiment: does the latent channel work at 14B but not 4B?",
+  "protocol": {
+    "task": "mbppplus",
+    "prompt": "sequential",
+    "n_problems": 45,
+    "generate_bs": 1,
+    "max_new_tokens": 4096,
+    "think": true,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "seed": 42,
+    "gpu": "L40S",
+    "note": "bs=1 deliberately: keeps the right-padding artifact out, so the only variable is model size."
+  },
+  "cells": [
+    {
+      "model": "Qwen/Qwen3-4B",
+      "latent_steps": 0,
+      "accuracy": 0.8222,
+      "correct": 37,
+      "n": 45,
+      "sec_per_problem": 32.52,
+      "source": "ls_sweep.json"
+    },
+    {
+      "model": "Qwen/Qwen3-4B",
+      "latent_steps": 10,
+      "accuracy": 0.5556,
+      "correct": 25,
+      "n": 45,
+      "sec_per_problem": 30.3,
+      "source": "ls_sweep.json"
+    },
+    {
+      "model": "Qwen/Qwen3-14B",
+      "latent_steps": 0,
+      "accuracy": 0.9333,
+      "correct": 42,
+      "n": 45,
+      "sec_per_problem": 63.5,
+      "gen_tok_per_problem": 1400.3,
+      "prompt_tok_per_problem": 1029.4,
+      "job": 55756630
+    },
+    {
+      "model": "Qwen/Qwen3-14B",
+      "latent_steps": 10,
+      "accuracy": 0.9111,
+      "correct": 41,
+      "n": 45,
+      "sec_per_problem": 61.1,
+      "gen_tok_per_problem": 1299.4,
+      "prompt_tok_per_problem": 1029.4,
+      "latent_positions": 30,
+      "job": 55756629
+    }
+  ],
+  "result": {
+    "channel_cost_4B_pts": -26.67,
+    "channel_cost_14B_pts": -2.22,
+    "verdict": "The latent channel costs 27 accuracy points at 4B and nothing measurable at 14B (one problem in 45), with code, task, prompt, batch size and GPU held fixed. The paper states no scale requirement; on this evidence there is one.",
+    "at_14B_the_channel_does_pay": "ls=10 vs ls=0 at 14B: 7.2% fewer generated tokens (1299.4 vs 1400.3) and 3.8% less wall clock (61.1 vs 63.5 s/problem) at statistically equal accuracy. Real, but far from the paper's x3.7 -- and note this is vs latent ls=0, NOT vs TextMAS, which is the paper's comparison arm and was not run at 14B."
+  },
+  "caveats": [
+    "45 problems ~ +/-7 pts sampling error: the 4B->14B gap (27 pts) is solid; the within-14B gap (2.2 pts, one problem) is not distinguishable from zero.",
+    "No 14B text_mas arm, so the paper's x3.7 (which is measured against TextMAS) is not directly tested at 14B.",
+    "The authors' only released log that genuinely ran the channel is HumanEval+/hierarchical, not MBPP+/sequential, so task/prompt is not ruled out as an additional factor."
+  ]
+}

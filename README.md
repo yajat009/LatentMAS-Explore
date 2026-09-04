@@ -127,11 +127,20 @@ problems. The only variable is model size:
 | **Qwen3-4B** | 0.822 | **0.556** | **−26.6 pts** |
 | **Qwen3-14B** | 0.933 | **0.911** | **−2.2 pts** (one problem) |
 
+Data: `repro/results/scale_2x2.json`.
+
 **At 14B the latent channel is free; at 4B it is catastrophic.** This is the central
 result of the reproduction. It also matches the authors' own released 14B log run at
 ls=10 (84.8% on HumanEval+) — the method does work, at 14B.
 
 The paper does not state a scale requirement. On this evidence there is one.
+
+**And at 14B the channel does pay — modestly.** Turning it on cuts generated tokens
+7.2% (1299.4 → from 1400.3) and wall clock 3.8% (61.1 vs 63.5 s/problem) at
+statistically equal accuracy. So the mechanism delivers, just an order of magnitude
+below the headline. Note the comparison arm: this is ls=10 vs ls=0, **not** vs
+TextMAS, which is what the paper's ×3.7 measures against and which was not run at
+14B here.
 
 Caveat: 45 problems carries roughly ±7 points of sampling error, so the 4B→14B gap
 (27 points) is solid but the within-14B gap (2.2 points, one problem) is not
