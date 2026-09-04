@@ -643,3 +643,60 @@ arms are running** — a chained resubmit would silently pick up new code mid-ru
 2. carry the true attention mask into `latent_mask` instead of `torch.ones`;
 3. left-pad instead, which also requires fixing the `sequences[idx, prompt_len:]`
    slice in `generate_text_batch` (finding #5).
+
+**Implemented on the `fix/right-padding` branch as `--pad_fix`**, opt-in so the
+unfixed path stays the reproduction path and both are reachable from one binary.
+Building it turned up a fourth change the list above misses: the direct
+`model(...)` calls in the latent loop do not derive `position_ids` from the mask
+the way `generate()` does, so under left padding every padded row would be
+shifted by its own pad width. See `repro/compare_padfix.py` for the A/B.
+
+---
+
+## 16. `--latent_space_realign` is a mathematical no-op on Qwen3-4B, and a near-orthogonal rewrite on Qwen3-14B
+
+The paper's "training-free alignment" solves `W_out @ M ≈ W_in` so a hidden state
+(output space) can be fed back as an input embedding. `models.py` builds `M` and
+then, without the flag, **replaces it with the identity**:
+
+```python
+if self.args.latent_space_realign:  pass
+else:                               realign_matrix = torch.eye(...)
+```
+
+`repro/check_realign.py` rebuilds that same least-squares solve and measures how
+far the result sits from the identity it would otherwise be. It reads only
+`embed_tokens.weight` and `lm_head.weight` out of the safetensors shards, so it
+costs no GPU and never materialises a 14B model in fp32.
+
+| model | `tie_word_embeddings` | ‖M−I‖/‖I‖ | mean diag of M | cos(h, hM) |
+|---|---|---|---|---|
+| Qwen3-4B | **True** | **0.0** | 1.0 | **1.0000** |
+| Qwen3-14B | False | **1.055** | 0.0021 | **0.0042** |
+
+**Qwen3-4B ties its input and output embeddings.** `W_out` *is* `W_in`, so
+`W_out @ M ≈ W_in` reduces to `W @ M ≈ W` and the solve returns the identity —
+to float precision, `cos(h, hM) = 1.0` exactly. The flag and its absence compute
+the identical thing. **`--latent_space_realign` cannot be tested at 4B at all**,
+and the six 4B realign jobs queued for it were cancelled once this was measured;
+one (ls=10) was kept as an empirical confirmation of the no-op.
+
+**Qwen3-14B does not tie them, and there the map is drastic.** `cos(h, hM) =
+0.004` means the realigned vector is essentially *orthogonal* to the hidden state
+it came from, and the mean diagonal of `M` is 0.002 — `M` is nothing like a
+perturbed identity. So at the paper's own model size, running with the flag and
+running without it are not two nearby settings; they are two different
+algorithms.
+
+**Which one produced the published numbers is not recoverable from the released
+logs.** Both print their full arg namespace, and neither contains a
+`latent_space_realign` field — just as neither contains `latent_steps` (finding
+#2). They came from an earlier revision that predates both flags. So for the
+14B/MBPP+ and 14B/HumanEval+ cells we know the latent channel's step count only
+by inference, and the alignment setting not at all.
+
+**Consequence for the reproduction:** this fork is 4B, and 4B is exactly the size
+at which this mechanism is inert. Testing the alignment claim requires Qwen3-8B or
+14B (both untied). That reframes finding #3's open question: the ls>0 accuracy
+collapse measured here *cannot* be attributed to the missing realignment, because
+at 4B there is no realignment to miss.

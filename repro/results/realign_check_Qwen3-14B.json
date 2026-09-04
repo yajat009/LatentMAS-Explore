@@ -1,0 +1,12 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "hidden_dim": 5120,
+  "weights_tied": false,
+  "target_norm": 1.3067,
+  "M_vs_I_relative_fro": 1.0548,
+  "M_diag_mean": 0.0021,
+  "M_offdiag_absmean": 0.003644,
+  "cosine_h_vs_hM_mean": 0.0042,
+  "cosine_h_vs_hM_min": -0.0368,
+  "verdict": "UNTIED and M is FAR from identity -- the flag is a real transform, and every run without it feeds output-space vectors into the input-embedding slot with only a norm rescale."
+}

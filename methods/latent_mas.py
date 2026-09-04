@@ -12,11 +12,6 @@ except ImportError:  # HF backend does not need vLLM
     SamplingParams = None
 import pdb
 
-try:
-    from transformers.cache_utils import Cache
-except ImportError:
-    Cache = None
-
 class LatentMASMethod:
     def __init__(
         self,
@@ -62,15 +57,42 @@ class LatentMASMethod:
         return tensor[..., start:, :].contiguous()
 
     def _truncate_past(self, past_kv: Optional[Tuple], tokens_to_keep: int) -> Optional[Tuple]:
+        """Keep only the LAST `tokens_to_keep` KV positions.
+
+        Reached only by the --sequential_info_only / --latent_only ablations.
+        Those flags were unreachable until run.py grew them, so this function had
+        never executed; the original implementation went through
+        Cache.to_legacy_cache()/from_legacy_cache(), which transformers 5.x removed
+        and which 4.57 keeps only as a deprecated shim. The modern cache exposes
+        `.layers`, each a DynamicLayer holding `.keys`/`.values` tensors shaped
+        [batch, heads, positions, head_dim], so slicing those in place works on
+        4.5x and forward. The two older shapes are kept as fallbacks.
+        """
         if past_kv is None or tokens_to_keep <= 0:
             return None
-        if Cache is not None and isinstance(past_kv, Cache):
-            legacy = past_kv.to_legacy_cache()
-            trimmed_legacy = tuple(
-                tuple(self._slice_tensor(t, tokens_to_keep) for t in layer)
-                for layer in legacy
-            )
-            return past_kv.__class__.from_legacy_cache(trimmed_legacy)
+
+        # transformers >= ~4.54: Cache object with a .layers list of DynamicLayer.
+        layers = getattr(past_kv, "layers", None)
+        if layers is not None:
+            for layer in layers:
+                keys = getattr(layer, "keys", None)
+                values = getattr(layer, "values", None)
+                if keys is None or values is None:
+                    continue
+                layer.keys = self._slice_tensor(keys, tokens_to_keep)
+                layer.values = self._slice_tensor(values, tokens_to_keep)
+            return past_kv
+
+        # transformers 4.3x-4.5x: Cache object with parallel key_cache/value_cache lists.
+        key_cache = getattr(past_kv, "key_cache", None)
+        value_cache = getattr(past_kv, "value_cache", None)
+        if key_cache is not None and value_cache is not None:
+            for i in range(len(key_cache)):
+                key_cache[i] = self._slice_tensor(key_cache[i], tokens_to_keep)
+                value_cache[i] = self._slice_tensor(value_cache[i], tokens_to_keep)
+            return past_kv
+
+        # Pre-Cache legacy format: tuple of per-layer (key, value) tuples.
         trimmed_layers = []
         for layer in past_kv:
             if isinstance(layer, tuple):

@@ -72,7 +72,12 @@ export PATH=/pub/$USER/envs/latentmas/bin:$PATH
 cd "$SLURM_SUBMIT_DIR"
 mkdir -p repro/logs repro/results
 
-TAG="${METHOD}_$(basename "$MODEL")_${TASK}_${PROMPT}_ls${LSTEPS}_bs${BS}_think${THINK}"
+# REALIGN must be in the tag. It is a different arm, so it needs a different
+# checkpoint -- without it a REALIGN=1 job resumes from the REALIGN=0 checkpoint
+# of the same ls/bs and silently reports a mixture of the two.
+RA_SUFFIX=""
+[ "$REALIGN" = "1" ] && RA_SUFFIX="_realign"
+TAG="${METHOD}_$(basename "$MODEL")_${TASK}_${PROMPT}_ls${LSTEPS}_bs${BS}_think${THINK}${RA_SUFFIX}"
 OUT="repro/results/${TAG}_${SLURM_JOB_ID}.log"
 # Checkpoint path is keyed on the CONFIG, not the job id, so a requeued attempt
 # (which keeps its job id) and a hand-resubmitted job both pick the work back up.
