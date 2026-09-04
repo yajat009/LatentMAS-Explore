@@ -1,5 +1,5 @@
 #!/bin/bash
-# latent_steps sweep -- the experiment repro/README.md calls the most informative
+# latent_steps sweep -- the experiment yajat/README.md calls the most informative
 # one available. Only ls=0 and ls=10 had been run, and accuracy falls 0.756 -> 0.378
 # between them. The sweep says whether that is monotonic (the latent channel is
 # actively harmful at 4B) or a cliff (something breaks at a specific length).
@@ -15,8 +15,8 @@
 # Every job is pinned to L40S because every previously-measured arm was on L40S.
 # free-gpu32 caps at 4 GPUs, so these queue and drain a few at a time.
 #
-# Usage:  ./repro/submit_ls_sweep.sh          # both arms
-#         REALIGN_ONLY=1 ./repro/submit_ls_sweep.sh
+# Usage:  ./yajat/submit_ls_sweep.sh          # both arms
+#         REALIGN_ONLY=1 ./yajat/submit_ls_sweep.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -38,7 +38,7 @@ for RA in $REALIGNS; do
   for LS in $LS_VALUES; do
     SUF=""; [ "$RA" = "1" ] && SUF="_realign"
     TAG="latent_mas_$(basename "$MODEL")_${TASK}_sequential_ls${LS}_bs${BS}_think1${SUF}"
-    CKPT="repro/results/${TAG}.ckpt.jsonl"
+    CKPT="yajat/results/${TAG}.ckpt.jsonl"
     have=0; [ -f "$CKPT" ] && have=$(wc -l < "$CKPT")
     if [ "$have" -ge "$NSAMP" ]; then
       echo "skip  ls=$LS realign=$RA -- already have $have/$NSAMP"
@@ -51,6 +51,6 @@ for RA in $REALIGNS; do
       --export=ALL,METHOD=latent_mas,MODEL=$MODEL,TASK=$TASK,PROMPT=sequential,\
 LSTEPS=$LS,NSAMP=$NSAMP,BS=$BS,MAXNEW=4096,REALIGN=$RA,THINK=1,\
 GPUMODEL=$GPUMODEL,JOBMEM=$JOBMEM,JOBTIME=$JOBTIME,CHAIN=1,CHAIN_N=0,CHAIN_MAX=20 \
-      repro/run_latentmas.sbatch
+      yajat/run_latentmas.sbatch
   done
 done

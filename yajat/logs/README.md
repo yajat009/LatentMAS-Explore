@@ -1,8 +1,8 @@
-# `repro/logs/` — Slurm and tooling logs
+# `yajat/logs/` — Slurm and tooling logs
 
 Gitignored by default (`latentmas-<jobid>.out/.err` from `run_latentmas.sbatch`,
 env-build and asset-fetch logs). Three are tracked because they are evidence for
-claims in `repro/README.md` rather than run noise:
+claims in `yajat/README.md` rather than run noise:
 
 | tracked file | what it shows |
 |---|---|

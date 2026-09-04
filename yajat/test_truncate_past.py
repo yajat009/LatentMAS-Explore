@@ -7,7 +7,7 @@ define until now. It also used the transformers 4.x legacy Cache shim that 5.x
 removed. This pins the contract -- keep the LAST N positions -- on every cache
 shape the code claims to support, with no GPU and no model download.
 
-    python repro/test_truncate_past.py
+    python yajat/test_truncate_past.py
 """
 import os
 import sys

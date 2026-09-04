@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
-#SBATCH --output=repro/logs/%x-%j.out
-#SBATCH --error=repro/logs/%x-%j.err
+#SBATCH --output=yajat/logs/%x-%j.out
+#SBATCH --error=yajat/logs/%x-%j.err
 # free-* partitions preempt. --requeue puts the job straight back in the queue and
 # --checkpoint (below) makes the restart resume instead of redoing 3 hours of work.
 # append mode so a requeued attempt does not truncate the previous attempt's log.
@@ -18,7 +18,7 @@
 #
 # Usage:
 #   sbatch --export=ALL,METHOD=latent_mas,MODEL=Qwen/Qwen3-14B,TASK=mbppplus,\
-# PROMPT=sequential,LSTEPS=0,NSAMP=-1,BS=20 repro/run_latentmas.sbatch
+# PROMPT=sequential,LSTEPS=0,NSAMP=-1,BS=20 yajat/run_latentmas.sbatch
 #
 # GPU selection cheat sheet (bf16 is HARDCODED in models.py -> never use V100/sm_70):
 #   Qwen3-4B  (~8 GB)  : --partition=free-gpu   --gres=gpu:A30:1
@@ -70,7 +70,7 @@ PY_BIN=/pub/$USER/envs/latentmas/bin/python
 export PATH=/pub/$USER/envs/latentmas/bin:$PATH
 
 cd "$SLURM_SUBMIT_DIR"
-mkdir -p repro/logs repro/results
+mkdir -p yajat/logs yajat/results
 
 # REALIGN must be in the tag. It is a different arm, so it needs a different
 # checkpoint -- without it a REALIGN=1 job resumes from the REALIGN=0 checkpoint
@@ -78,10 +78,10 @@ mkdir -p repro/logs repro/results
 RA_SUFFIX=""
 [ "$REALIGN" = "1" ] && RA_SUFFIX="_realign"
 TAG="${METHOD}_$(basename "$MODEL")_${TASK}_${PROMPT}_ls${LSTEPS}_bs${BS}_think${THINK}${RA_SUFFIX}"
-OUT="repro/results/${TAG}_${SLURM_JOB_ID}.log"
+OUT="yajat/results/${TAG}_${SLURM_JOB_ID}.log"
 # Checkpoint path is keyed on the CONFIG, not the job id, so a requeued attempt
 # (which keeps its job id) and a hand-resubmitted job both pick the work back up.
-CKPT="repro/results/${TAG}.ckpt.jsonl"
+CKPT="yajat/results/${TAG}.ckpt.jsonl"
 
 ckpt_lines() { [ -f "$CKPT" ] && wc -l < "$CKPT" || echo 0; }
 
@@ -102,7 +102,7 @@ resubmit() {
     --export=ALL,METHOD=$METHOD,MODEL=$MODEL,TASK=$TASK,PROMPT=$PROMPT,LSTEPS=$LSTEPS,\
 NSAMP=$NSAMP,BS=$BS,MAXNEW=$MAXNEW,REALIGN=$REALIGN,THINK=$THINK,\
 CHAIN=$CHAIN,CHAIN_N=$next,CHAIN_MAX=$CHAIN_MAX,GPUMODEL=$GPUMODEL,JOBMEM=$JOBMEM,JOBTIME=$JOBTIME \
-    repro/run_latentmas.sbatch
+    yajat/run_latentmas.sbatch
 }
 
 # GPU model is pinned across every arm on purpose: wall-clock is half the paper's

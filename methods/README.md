@@ -20,4 +20,4 @@ Two lines worth knowing before you run anything:
   permanently False. They are the paper's ablations, currently unreachable.
 
 Unmodified from upstream except for the vLLM import guard applied by
-`repro/02_patch_blockers.sh`.
+`yajat/02_patch_blockers.sh`.

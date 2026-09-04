@@ -2,7 +2,7 @@
 
 Upstream artifacts, unmodified. They matter more than "examples" suggests:
 **each one is exactly one cell of the paper**, confirmed to the token by
-`repro/analyze.py` re-tokenizing every `[Output]` block.
+`yajat/analyze.py` re-tokenizing every `[Output]` block.
 
 | file | accuracy (log / paper) | gen tokens/problem (log / paper) | paper cell |
 |---|---|---|---|
@@ -19,4 +19,4 @@ Two things they pin down that the paper does not state:
 
 Both logs print `method: muscle` and carry no `latent_steps` field in their arg
 namespace, so they came from an **earlier code revision** than the released
-`run.py`. Full analysis in `repro/README.md`.
+`run.py`. Full analysis in `yajat/README.md`.

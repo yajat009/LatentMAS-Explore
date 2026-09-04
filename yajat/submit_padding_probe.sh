@@ -28,6 +28,6 @@ for BS in 1 20; do
   sbatch --partition=free-gpu --gres=gpu:A100:1 --time=3:00:00 \
     --export=ALL,MODEL=$MODEL,TASK=$TASK,METHOD=latent_mas,PROMPT=sequential,\
 LSTEPS=$LSTEPS,NSAMP=$NSAMP,BS=$BS,MAXNEW=4096,THINK=1 \
-    repro/run_latentmas.sbatch
+    yajat/run_latentmas.sbatch
 done
 squeue -u "$USER" -o "%.10i %.12P %.26j %.8T %.10M %R"

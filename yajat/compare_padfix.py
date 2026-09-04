@@ -5,10 +5,10 @@ Both arms run the same problems, the same latent_steps, the same batch size and
 the same seed; the only difference is the three-part padding fix. Anything that
 moves is the padding artifact.
 
-Run the two arms first (see repro/README.md), then:
+Run the two arms first (see yajat/README.md), then:
 
-    python repro/compare_padfix.py --off repro/results/padfix_off.ckpt.jsonl \\
-                                   --on  repro/results/padfix_on.ckpt.jsonl
+    python yajat/compare_padfix.py --off yajat/results/padfix_off.ckpt.jsonl \\
+                                   --on  yajat/results/padfix_on.ckpt.jsonl
 """
 import argparse
 import json
@@ -26,9 +26,9 @@ def summarise(path, label):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--off", default="repro/results/padfix_off.ckpt.jsonl")
-    ap.add_argument("--on", default="repro/results/padfix_on.ckpt.jsonl")
-    ap.add_argument("--out", default="repro/results/padfix_comparison.json")
+    ap.add_argument("--off", default="yajat/results/padfix_off.ckpt.jsonl")
+    ap.add_argument("--on", default="yajat/results/padfix_on.ckpt.jsonl")
+    ap.add_argument("--out", default="yajat/results/padfix_comparison.json")
     args = ap.parse_args()
 
     arms = []

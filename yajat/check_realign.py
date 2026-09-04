@@ -16,7 +16,7 @@ input-embedding slot, which is the leading explanation for the ls>0 collapse.
 
 CPU-only and weights-only -- no GPU, no generation.
 
-    python repro/check_realign.py --model Qwen/Qwen3-4B
+    python yajat/check_realign.py --model Qwen/Qwen3-4B
 """
 import argparse
 import json
@@ -57,7 +57,7 @@ def _load_embeddings(model_name, tied):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
-    ap.add_argument("--out", default="repro/results/realign_check.json")
+    ap.add_argument("--out", default="yajat/results/realign_check.json")
     args = ap.parse_args()
 
     os.environ.setdefault("HF_HOME", f"/pub/{os.environ.get('USER','')}/hf")

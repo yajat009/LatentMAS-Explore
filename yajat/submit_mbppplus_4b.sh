@@ -16,8 +16,8 @@ COMMON=(--partition=free-gpu32 --gres=gpu:L40S:1 --mem=32G --time=12:00:00)
 BASE="MODEL=Qwen/Qwen3-4B,TASK=mbppplus,PROMPT=sequential,NSAMP=-1,BS=15"
 
 # baseline               -- single agent, the arm LatentMAS must beat on cost
-sbatch "${COMMON[@]}" --export=ALL,$BASE,METHOD=baseline,LSTEPS=0    repro/run_latentmas.sbatch
+sbatch "${COMMON[@]}" --export=ALL,$BASE,METHOD=baseline,LSTEPS=0    yajat/run_latentmas.sbatch
 # latent_mas ls=0        -- the released-log config; degenerate, judger gets past_kv=None
-sbatch "${COMMON[@]}" --export=ALL,$BASE,METHOD=latent_mas,LSTEPS=0  repro/run_latentmas.sbatch
+sbatch "${COMMON[@]}" --export=ALL,$BASE,METHOD=latent_mas,LSTEPS=0  yajat/run_latentmas.sbatch
 # latent_mas ls=10       -- the latent channel actually switched on
-sbatch "${COMMON[@]}" --export=ALL,$BASE,METHOD=latent_mas,LSTEPS=10 repro/run_latentmas.sbatch
+sbatch "${COMMON[@]}" --export=ALL,$BASE,METHOD=latent_mas,LSTEPS=10 yajat/run_latentmas.sbatch

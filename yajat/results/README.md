@@ -1,4 +1,4 @@
-# `repro/results/` — run outputs
+# `yajat/results/` — run outputs
 
 Mostly gitignored: raw stdout logs are multi-MB (`run.py` prints every full
 prompt) and the `--checkpoint` JSONL carries the entire agent trace per problem.

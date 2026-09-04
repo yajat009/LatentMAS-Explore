@@ -119,7 +119,7 @@ The final JSON line carries `accuracy`, `correct`, `total_time_sec`,
 `time_per_sample_sec` -- and nothing about tokens. The paper's central efficiency
 claim is a token claim, so it cannot be checked from run.py output alone.
 
-`repro/analyze.py` closes this: it parses the stdout log, re-tokenizes every
+`yajat/analyze.py` closes this: it parses the stdout log, re-tokenizes every
 agent's `[Output]` block with the model's own tokenizer, and reports generated
 tokens per problem broken down by agent role, plus token/speed deltas between
 methods. Validated against `example_logs/qwen3_14b_mbppplus_sequential.txt`:
@@ -185,23 +185,23 @@ arc_challenge 1172 · gpqa 198 · medqa 300 · aime24/25 30 each.
 ```bash
 cd ~/LatentMAS-Explore
 
-./repro/00_setup_env.sh          # login node, ~10 min. Do NOT reuse the existing
+./yajat/00_setup_env.sh          # login node, ~10 min. Do NOT reuse the existing
                                  # `latentmas` env (torch 2.13 + nccl-cu12 2.19.3
                                  # mismatch -> undefined symbol: ncclCommResume)
-./repro/01_fetch_assets.sh       # login node, ~55 GB into /pub/$USER/hf
-./repro/02_patch_blockers.sh     # fixes #3 and #4
+./yajat/01_fetch_assets.sh       # login node, ~55 GB into /pub/$USER/hf
+./yajat/02_patch_blockers.sh     # fixes #3 and #4
 
 # Smoke test: 8 samples, 4B, cheap A30. Confirms the whole path end to end.
 sbatch --partition=free-gpu --gres=gpu:A30:1 --time=1:00:00 \
   --export=ALL,MODEL=Qwen/Qwen3-4B,TASK=gsm8k,METHOD=latent_mas,PROMPT=sequential,LSTEPS=10,NSAMP=8,BS=4 \
-  repro/run_latentmas.sbatch
+  yajat/run_latentmas.sbatch
 
 # Padding probe (finding #5): same 30 samples, bs=1 vs bs=20.
 # Then the two runs that have released reference logs to diff against:
 sbatch --export=ALL,MODEL=Qwen/Qwen3-14B,TASK=mbppplus,METHOD=latent_mas,PROMPT=sequential,LSTEPS=0,NSAMP=-1,BS=20 \
-  repro/run_latentmas.sbatch     # target 76.19%
+  yajat/run_latentmas.sbatch     # target 76.19%
 sbatch --export=ALL,MODEL=Qwen/Qwen3-14B,TASK=humanevalplus,METHOD=latent_mas,PROMPT=hierarchical,LSTEPS=10,NSAMP=-1,BS=20 \
-  repro/run_latentmas.sbatch
+  yajat/run_latentmas.sbatch
 
 # The claim is comparative, so each LatentMAS run needs its two partners:
 #   METHOD=baseline  (no --prompt effect)
@@ -295,7 +295,7 @@ were moved to L40S together.
 
 ## 10. The two released logs ARE two paper cells — confirmed to the token
 
-`repro/analyze.py` re-tokenizes every agent's `[Output]` block. Run against the two
+`yajat/analyze.py` re-tokenizes every agent's `[Output]` block. Run against the two
 released logs with the Qwen3-14B tokenizer, it reproduces the paper's **Token**
 column exactly:
 
@@ -311,7 +311,7 @@ behind those cells. That pins down two things the paper does not state.
 
 Per finding #2 the mbppplus log has `latent_steps: 0` in all 1134 trace entries.
 Combined with #1, the judger receives `past_key_values=None`. Verified live with
-`repro/trace_pipeline.py` on Qwen3-4B/GSM8K:
+`yajat/trace_pipeline.py` on Qwen3-4B/GSM8K:
 
 ```
 latent_steps=10                          latent_steps=0
@@ -418,7 +418,7 @@ Preemption destroyed two arms that were 52% and 32% done (jobs 55644121 /
   for a single pass.
 
 `run_latentmas.sbatch` sets `#SBATCH --requeue` + `--open-mode=append` and passes
-`--checkpoint repro/results/${TAG}.ckpt.jsonl`. The path is keyed on the **config**,
+`--checkpoint yajat/results/${TAG}.ckpt.jsonl`. The path is keyed on the **config**,
 not the job id, so a requeued attempt (same job id) and a hand-resubmitted job
 both pick the work back up. The stdout log is `tee -a`'d for the same reason.
 
@@ -430,11 +430,11 @@ Verified end to end on GSM8K/Qwen3-4B before launching:
 | 2 (`--max_samples 8`) | `[resume] restored 4/8`, continued at Problem #5, `resumed_from: 4`, `total_time_sec 35.7` (= 18.8 + 16.9) |
 | 3 (rerun of pass 2) | `restored 8/8`, no duplicate records, no recomputation |
 
-The original `run.py` is preserved at `repro/run.py.orig`.
+The original `run.py` is preserved at `yajat/run.py.orig`.
 
 ### 13b. Submitting the three-arm comparison
 
-`repro/submit_mbppplus_4b.sh` — Qwen3-4B / MBPP+ / bs=15 / think=1 /
+`yajat/submit_mbppplus_4b.sh` — Qwen3-4B / MBPP+ / bs=15 / think=1 /
 max_new_tokens=4096, all three arms pinned to `gpu:L40S:1` on `free-gpu32` so
 wall-clock stays comparable (finding #11):
 
@@ -476,7 +476,7 @@ attempt, so a genuine crash (bad flag, OOM) fails once instead of twenty times.
 Knobs: `CHAIN=0` disables, `GPUMODEL`/`JOBMEM`/`JOBTIME` are carried to the child so
 the GPU model stays pinned across the whole chain.
 
-### 10. `repro/compare_arms.py` — compare arms *while they are still running*
+### 10. `yajat/compare_arms.py` — compare arms *while they are still running*
 
 `analyze.py` parses a finished stdout log. Under constant preemption a finished log
 is the exception, so `compare_arms.py` reads the `--checkpoint` JSONL instead. Each
@@ -541,7 +541,7 @@ relaunch it as a batch job — the checkpoint makes it resume:
 ```bash
 sbatch --partition=free-gpu32 --gres=gpu:L40S:1 --mem=32G --time=12:00:00 \
   --export=ALL,METHOD=text_mas,MODEL=Qwen/Qwen3-4B,TASK=mbppplus,PROMPT=sequential,\
-LSTEPS=0,NSAMP=-1,BS=15 repro/run_latentmas.sbatch
+LSTEPS=0,NSAMP=-1,BS=15 yajat/run_latentmas.sbatch
 ```
 
 Never run two processes against one checkpoint file — they both append.
@@ -649,7 +649,7 @@ unfixed path stays the reproduction path and both are reachable from one binary.
 Building it turned up a fourth change the list above misses: the direct
 `model(...)` calls in the latent loop do not derive `position_ids` from the mask
 the way `generate()` does, so under left padding every padded row would be
-shifted by its own pad width. See `repro/compare_padfix.py` for the A/B.
+shifted by its own pad width. See `yajat/compare_padfix.py` for the A/B.
 
 ---
 
@@ -664,7 +664,7 @@ if self.args.latent_space_realign:  pass
 else:                               realign_matrix = torch.eye(...)
 ```
 
-`repro/check_realign.py` rebuilds that same least-squares solve and measures how
+`yajat/check_realign.py` rebuilds that same least-squares solve and measures how
 far the result sits from the identity it would otherwise be. It reads only
 `embed_tokens.weight` and `lm_head.weight` out of the safetensors shards, so it
 costs no GPU and never materialises a 14B model in fp32.

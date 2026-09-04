@@ -7,9 +7,9 @@ generate_text_batch and prints, per agent, how the cache grows and where the
 tokens do (and do not) get spent.
 
 Usage:
-  python repro/trace_pipeline.py --method latent_mas --latent_steps 10
-  python repro/trace_pipeline.py --method latent_mas --latent_steps 0   # the released-log setting
-  python repro/trace_pipeline.py --method text_mas
+  python yajat/trace_pipeline.py --method latent_mas --latent_steps 10
+  python yajat/trace_pipeline.py --method latent_mas --latent_steps 0   # the released-log setting
+  python yajat/trace_pipeline.py --method text_mas
 """
 import argparse
 import os

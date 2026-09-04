@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare method arms on the prefix of problems ALL of them have finished.
 
-Why not repro/analyze.py: that one parses a finished stdout log. These runs are
+Why not yajat/analyze.py: that one parses a finished stdout log. These runs are
 preempted constantly, so a "finished log" is rare and a partial log is the normal
 case. The --checkpoint JSONL is written after every batch and already carries the
 full agent trace (`input_tokens` per agent, plus each agent's `output` text), so
@@ -16,8 +16,8 @@ carried across preemption by run.py's resume. It is only meaningful if every arm
 ran on the same GPU model (all of these: L40S).
 
 Usage:
-    python repro/compare_arms.py                        # every mbppplus/4B arm
-    python repro/compare_arms.py --glob 'repro/results/*gsm8k*.ckpt.jsonl'
+    python yajat/compare_arms.py                        # every mbppplus/4B arm
+    python yajat/compare_arms.py --glob 'yajat/results/*gsm8k*.ckpt.jsonl'
 """
 import argparse
 import ast
@@ -72,9 +72,9 @@ def elapsed_at(marks, n):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--glob", default="repro/results/*mbppplus*.ckpt.jsonl")
+    ap.add_argument("--glob", default="yajat/results/*mbppplus*.ckpt.jsonl")
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-4B")
-    ap.add_argument("--out", default="repro/results/arm_comparison.json")
+    ap.add_argument("--out", default="yajat/results/arm_comparison.json")
     ap.add_argument("--no-tokens", action="store_true",
                     help="skip loading the tokenizer (accuracy + timing only)")
     args = ap.parse_args()

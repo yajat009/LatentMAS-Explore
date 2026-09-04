@@ -7,7 +7,7 @@ the missing half by re-tokenizing every agent's [Output] block with the model's
 own tokenizer.
 
 Usage:
-    python repro/analyze.py repro/results/*.log
+    python yajat/analyze.py yajat/results/*.log
 """
 import argparse
 import json
@@ -76,7 +76,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("logs", nargs="+")
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-4B")
-    ap.add_argument("--out", default="repro/results/summary.json")
+    ap.add_argument("--out", default="yajat/results/summary.json")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer

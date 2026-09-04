@@ -54,7 +54,7 @@ latent_steps=10                        latent_steps=0
 
 ## Changes made to this repo
 
-Everything in `repro/` is new. Upstream files were changed only where noted.
+Everything in `yajat/` is new. Upstream files were changed only where noted.
 
 ### 1. Fixes required to make the repo run at all
 
@@ -65,7 +65,7 @@ Everything in `repro/` is new. Upstream files were changed only where noted.
 | `data.py` | Bare dataset id `gsm8k` → `openai/gsm8k`; modern `huggingface_hub` rejects the legacy form. |
 | `methods/latent_mas.py` | Ported `_truncate_past` off the legacy `Cache` API, removed in transformers 5.x. |
 
-Applied by `repro/02_patch_blockers.sh`. Original `run.py` kept at `repro/run.py.orig`.
+Applied by `yajat/02_patch_blockers.sh`. Original `run.py` kept at `yajat/run.py.orig`.
 
 ### 2. New capability in `run.py`
 
@@ -87,16 +87,16 @@ claim is a token claim.
 
 | script | what it does |
 |---|---|
-| `repro/analyze.py` | Re-tokenizes every agent's `[Output]` block from a stdout log |
-| `repro/compare_arms.py` | Reads the checkpoint JSONL instead, so it works **mid-run**; compares arms on the prefix they have all finished |
-| `repro/analyze_sweep.py` | Builds the `latent_steps` sweep table and classifies its shape |
-| `repro/check_realign.py` | Rebuilds the realign least-squares solve from safetensors — no GPU, never materializes a 14B model |
-| `repro/compare_padfix.py` | A/B for `--pad_fix` |
-| `repro/trace_pipeline.py` | Narrates the KV cache growing across agents — fastest way to see the mechanism |
+| `yajat/analyze.py` | Re-tokenizes every agent's `[Output]` block from a stdout log |
+| `yajat/compare_arms.py` | Reads the checkpoint JSONL instead, so it works **mid-run**; compares arms on the prefix they have all finished |
+| `yajat/analyze_sweep.py` | Builds the `latent_steps` sweep table and classifies its shape |
+| `yajat/check_realign.py` | Rebuilds the realign least-squares solve from safetensors — no GPU, never materializes a 14B model |
+| `yajat/compare_padfix.py` | A/B for `--pad_fix` |
+| `yajat/trace_pipeline.py` | Narrates the KV cache growing across agents — fastest way to see the mechanism |
 
 ### 4. Cluster harness
 
-`repro/run_latentmas.sbatch` (self-resubmitting on SIGTERM, guarded by "did the
+`yajat/run_latentmas.sbatch` (self-resubmitting on SIGTERM, guarded by "did the
 checkpoint grow this attempt?" so a real crash fails once, not twenty times), plus
 `00_setup_env.sh`, `01_fetch_assets.sh`, and the `submit_*.sh` launchers.
 
@@ -109,7 +109,7 @@ Qwen3-4B unless stated; the scale table below adds Qwen3-14B.
 
 ### Main comparison — all 378 problems
 
-All three arms complete (`repro/results/arm_comparison.json`):
+All three arms complete (`yajat/results/arm_comparison.json`):
 
 | arm | accuracy | sec/problem | gen tok/prob | prompt tok/prob |
 |---|---|---|---|---|
@@ -155,7 +155,7 @@ problems. The only variable is model size:
 | **Qwen3-4B** | 0.822 | **0.556** | **−26.6 pts** |
 | **Qwen3-14B** | 0.933 | **0.911** | **−2.2 pts** (one problem) |
 
-Data: `repro/results/scale_2x2.json`.
+Data: `yajat/results/scale_2x2.json`.
 
 **At 14B the latent channel is free; at 4B it is catastrophic.** This is the central
 result of the reproduction. It also matches the authors' own released 14B log run at
@@ -366,7 +366,7 @@ loop to record, at each step, the **maximum cosine similarity between the latent
 and any row of `W_in`** — i.e. how close the state stays to any real token embedding.
 If it decays fast at 4B and holds at 14B, drift is confirmed and the mechanism is
 established rather than inferred. One forward pass per step, no generation, minutes per
-model; it belongs in `repro/trace_pipeline.py`, which already walks the loop.
+model; it belongs in `yajat/trace_pipeline.py`, which already walks the loop.
 
 ---
 
@@ -384,7 +384,7 @@ Built and run on UCI HPC3. Two constraints shaped every script:
 `models.py` hardcodes `torch.bfloat16` — never schedule on V100 (sm_70) or
 RTX6000 (sm_75).
 
-Detailed findings and full order of operations: **[`repro/README.md`](repro/README.md)**.
+Detailed findings and full order of operations: **[`yajat/README.md`](yajat/README.md)**.
 
 ## License
 

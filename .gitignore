@@ -4,20 +4,24 @@ __pycache__/
 # Run artifacts. run.py prints every full prompt, so a single 378-problem stdout
 # log is multi-MB, and the --checkpoint JSONL carries the whole agent trace per
 # problem and grows while a job runs. Track the distilled summaries instead.
-repro/logs/*
-repro/results/*
+yajat/logs/*
+yajat/results/*
 
 # Distilled summaries and folder labels -- these are the evidence, keep them.
-!repro/results/README.md
-!repro/results/arm_comparison.json
-!repro/results/padding_probe.json
-!repro/results/summary.json
-!repro/results/reference_summary.json
-!repro/results/ls_sweep.json
-!repro/results/scale_2x2.json
-!repro/results/realign_check_*.json
-!repro/results/padfix_comparison.json
-!repro/logs/README.md
-!repro/logs/analyze_reference.log
-!repro/logs/trace_latent_ls0.log
-!repro/logs/trace_latent_ls10.log
+!yajat/results/README.md
+!yajat/results/arm_comparison.json
+!yajat/results/padding_probe.json
+!yajat/results/summary.json
+!yajat/results/reference_summary.json
+!yajat/results/ls_sweep.json
+!yajat/results/scale_2x2.json
+!yajat/results/realign_check_*.json
+!yajat/results/padfix_comparison.json
+!yajat/logs/README.md
+!yajat/logs/analyze_reference.log
+!yajat/logs/trace_latent_ls0.log
+!yajat/logs/trace_latent_ls10.log
+
+# Compatibility symlink repro -> yajat, kept only while jobs submitted under
+# the old path are still in flight. Not part of the tree.
+/repro

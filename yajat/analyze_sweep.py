@@ -2,7 +2,7 @@
 """Summarise the latent_steps sweep: accuracy as a function of the silent-thought
 budget, with and without --latent_space_realign.
 
-Answers the question repro/README.md leaves open. Only ls=0 and ls=10 had ever
+Answers the question yajat/README.md leaves open. Only ls=0 and ls=10 had ever
 been run, and accuracy falls from 0.756 to 0.378 between them. Two stories fit
 those two points and they imply opposite things:
 
@@ -17,8 +17,8 @@ only a norm rescale. If that is the problem, the realign arm recovers.
 Reads the per-arm checkpoint JSONLs, so it works mid-sweep -- reporting every
 arm on the common prefix of problems they have all finished.
 
-    python repro/analyze_sweep.py
-    python repro/analyze_sweep.py --min-n 20     # include partial arms
+    python yajat/analyze_sweep.py
+    python yajat/analyze_sweep.py --min-n 20     # include partial arms
 """
 import argparse
 import glob
@@ -35,8 +35,8 @@ PAT = re.compile(r"_ls(\d+)_bs(\d+)_think\d+(_realign)?$")
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--glob", default="repro/results/latent_mas_*_mbppplus_sequential_ls*_bs1_think1*.ckpt.jsonl")
-    ap.add_argument("--out", default="repro/results/ls_sweep.json")
+    ap.add_argument("--glob", default="yajat/results/latent_mas_*_mbppplus_sequential_ls*_bs1_think1*.ckpt.jsonl")
+    ap.add_argument("--out", default="yajat/results/ls_sweep.json")
     ap.add_argument("--min-n", type=int, default=1,
                     help="ignore arms with fewer than this many finished problems")
     args = ap.parse_args()

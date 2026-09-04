@@ -19,7 +19,7 @@ GRES=${GRES:-gpu:A30:1}
 sub () {  # sub <method> <lsteps> <timelimit>
   sbatch --partition="$PART" --gres="$GRES" --time="$3" \
     --export=ALL,MODEL=$MODEL,TASK=$TASK,METHOD=$1,PROMPT=$PROMPT,LSTEPS=$2,NSAMP=$NSAMP,BS=$BS,MAXNEW=4096,THINK=1 \
-    repro/run_latentmas.sbatch
+    yajat/run_latentmas.sbatch
 }
 
 # latent_mas: only the judger generates -> fastest
