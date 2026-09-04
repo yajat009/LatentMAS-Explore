@@ -111,11 +111,26 @@ wall clock, ×1.37 in generated tokens — but neither figure is the claimed ×3
 lower accuracy, 1.5× slower, 4.5× the prefill. There is no dimension on which it
 wins here. TextMAS beats the baseline by only 2.9 points for 3.3× the wall clock.
 
-> **The wall-clock ratio is confounded.** LatentMAS ran 15 problems at a time,
-> TextMAS only 8 (TextMAS OOMs at 15). A bigger batch lowers time-per-problem on its
-> own, because fixed GPU overhead is shared across more work — so part of the ×2.09
-> is batch size, not method. The **token** ratio (×1.37) is batch-independent and is
-> the trustworthy one. A matched `latent_mas` bs=8 run is in flight to decontaminate this.
+> **The wall-clock ratio was confounded — and correcting it makes the speedup
+> larger, not smaller.** The table above compares LatentMAS at bs=15 against TextMAS
+> at bs=8 (TextMAS OOMs at 15), and a bigger batch lowers time-per-problem on its own.
+> Re-running LatentMAS at a matched bs=8 gives, on the 216 problems both have finished:
+>
+> | arm (both bs=8) | accuracy | sec/prob | gen tok |
+> |---|---|---|---|
+> | `latent_mas` ls=10 | 0.324 | **43.0** | 1575.5 |
+> | `text_mas` | 0.713 | **99.7** | 2191.5 |
+>
+> **×2.32 wall clock, ×1.39 generated tokens** — against the paper's ×3.7. So the
+> confound was real and worth removing, but it was hiding a *higher* speedup, and the
+> claim still does not reproduce on either axis. The token ratio is batch-independent
+> and barely moved (×1.37 → ×1.39), which is the consistency check.
+>
+> (LatentMAS is marginally *faster* at bs=8 than bs=15 — 43.0 vs 44.5 s/problem —
+> backwards from normal batching behaviour, and most likely the padding: bs=15 packs
+> more pad per sequence, so more compute is wasted on non-tokens. Accuracy rises too,
+> 0.228 → 0.324, for the same reason. Figures are on 216/378 problems; the arm is
+> still running.)
 
 ### Scale — the decisive experiment
 
