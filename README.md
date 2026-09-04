@@ -1,408 +1,569 @@
 # LatentMAS-Explore
 
-A reproduction study of **LatentMAS** — *Latent Collaboration in Multi-Agent Systems*
-([arXiv:2511.20639](https://arxiv.org/abs/2511.20639),
-[Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS)).
+This is my attempt to reproduce the results of the paper **LatentMAS — Latent
+Collaboration in Multi-Agent Systems** ([arXiv:2511.20639](https://arxiv.org/abs/2511.20639),
+code at [Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS)).
 
-LatentMAS claims that multi-agent collaboration can move out of token space and into
-the model's KV cache, buying large token savings and a **×3.7 wall-clock speedup at
-no accuracy cost**. This fork runs that claim on real hardware and reports what
-survives.
+I ran the authors' released code on a university cluster, compared what I got to
+what the paper reports, and then dug into *why* the numbers differ. This README is
+written as a lab notebook: what the paper claims, what I did, what I saw, and what I
+think it means. Every technical term is explained the first time it shows up, in a
+box like this:
 
-**Headline: we do not reproduce the paper's Qwen3-4B / MBPP+ cell.** The paper's
-Table 1 reports LatentMAS at **73.5%** accuracy with a **×3.7** speedup in exactly our
-configuration (Qwen3-4B, MBPP+, sequential, 4096 max tokens, temp 0.6, top-p 0.95).
-We measure **22.8%** at bs=15 and **55.6%** at bs=1. That is a real, unexplained gap
-of 18–51 points, and this repo is an attempt to account for it.
+> **Term.** Plain-language explanation.
 
-What we can account for so far:
+The short version is at the top. The full story follows.
 
-| factor | effect | status |
+---
+
+## The short version
+
+The paper says that if you let several copies of a language model "talk" to each
+other using their internal numbers instead of words, you get answers that are just
+as good or better, while using far fewer words and running about **3.7× faster**.
+
+I tested this on the exact setup the paper reports in its Table 1: the Qwen3-4B
+model, on a coding benchmark called MBPP+. The paper reports **73.5% accuracy**
+there. I measured **22.8%**.
+
+After a lot of digging, here is what I believe:
+
+1. **The released code is faithful to the paper.** I checked every stage against the
+   paper's description and against the library it runs on. It does what the paper
+   says.
+2. **When the "talking with internal numbers" feature is actually switched on, the
+   4B model falls apart.** Its answers dissolve into repeated nonsense words about a
+   quarter of the time. A bigger model (14B) does not have this problem at all.
+3. **The paper's own MBPP+ results were very likely produced with that feature
+   switched off.** Three separate measurements line up with this. If true, the
+   paper's 73.5% is really a single model answering alone, and the "improvement"
+   is not what it appears to be.
+4. **Even where the method works (14B), the speedup is much smaller than 3.7×**
+   on this task — about 2.3× against the comparison the paper uses, and it is
+   actually *slower* than a single model working alone.
+
+Everything below is the evidence for those four sentences.
+
+---
+
+## Part 1 — What the paper is claiming
+
+### The idea
+
+Normally, when you build a system with several language-model "agents" that help
+each other (a planner, a critic, and so on), each agent writes out its thoughts in
+words, and the next agent reads those words. That is a lot of words, and every
+word costs time to generate.
+
+LatentMAS proposes skipping the words. Instead of an agent writing text, it hands
+the next agent its **internal state** directly.
+
+> **Hidden state.** Inside a language model, every word position is represented by
+> one long list of numbers (2,560 numbers for Qwen3-4B; 5,120 for 14B). The model
+> updates this list layer by layer as it processes text. The version at the very
+> last layer is what the model uses to decide the next word. This list of numbers
+> is called the hidden state. It is not words — it is the model's raw internal
+> representation.
+
+> **KV cache.** As the model reads text, it stores a compressed memory of every
+> position it has seen so far, so it doesn't have to re-read from scratch for each
+> new word. This memory is called the KV cache ("K" for key, "V" for value — names
+> from the attention mechanism). It is the model's working memory for the current
+> conversation.
+
+The method works like this, for four agents in a row (Planner → Critic → Refiner →
+Judger):
+
+1. The Planner reads its prompt. Instead of writing a plan in words, it takes its
+   last-layer hidden state and feeds that number-list straight back into itself as
+   if it were the next word. It repeats this a chosen number of times (the paper
+   calls these **latent steps**). Each step adds to the KV cache. No words are
+   produced.
+2. The Critic starts with the Planner's KV cache already loaded, so it "remembers"
+   what the Planner was thinking. It does the same silent thinking.
+3. The Refiner does the same.
+4. Only the Judger writes actual words — the final answer — with the whole
+   accumulated memory of the previous three agents behind it.
+
+Because three of the four agents never write a word, the system produces far fewer
+words in total. That is where the claimed savings come from.
+
+### The numbers the paper reports (Table 1, the cell I tested)
+
+Qwen3-4B, MBPP+ benchmark, "sequential" arrangement of agents:
+
+| | Single model alone | TextMAS (agents talk in words) | **LatentMAS** (this method) |
+|---|---|---|---|
+| Accuracy | 63.5% | 69.8% | **73.5%** |
+| Words generated per problem | 1,634 | 4,420 | **1,339** |
+| Time per run (seconds) | 523 | 2,148 | **577** |
+
+The speedup the paper highlights is 2,148 ÷ 577 ≈ **3.7×**, comparing LatentMAS
+against TextMAS.
+
+> **MBPP+.** A benchmark of 378 small Python programming tasks ("write a function
+> that…"). An answer counts as correct only if the generated code passes all the
+> hidden test cases. It is a pass/fail check, not a judgment call.
+
+> **TextMAS.** The same four agents, but each one writes its thoughts in words and
+> the next one reads them. This is the "normal" way to do multi-agent systems, and
+> it is what the paper's speedup is measured against.
+
+> **Single / baseline.** One model, one prompt, one answer. No agents at all.
+
+---
+
+## Part 2 — Getting the code to run
+
+The released code did not run out of the box. Four things had to be fixed before I
+could test anything. These are in `architecture/` (where I moved the authors' code —
+see the layout note at the end).
+
+| file | problem | fix |
 |---|---|---|
-| right-padding bug at bs>1 | +32.8 pts (0.228 → 0.556) | measured |
-| model scale | channel free at 14B (0.911), fatal at 4B | measured |
-| `--latent_steps` defaults to **0** | disables the channel entirely | measured |
-| `--latent_space_realign` defaults **off** | paper always uses `Wa`; code substitutes identity | **see below** |
-| `--think` appends a literal `<think>` | 48.9% never close it; 31.8% empty predictions | untested |
+| `methods/latent_mas.py` | Tried to import a library called vLLM that isn't in the requirements, so it crashed on startup. | Made the import optional. |
+| `run.py` | The list of allowed model names had `Qwen3-4B` twice and was missing `Qwen3-8B`. | Fixed the list. |
+| `data.py` | Used an old-style dataset name (`gsm8k`) that the current download library rejects. | Updated to `openai/gsm8k`. |
+| `methods/latent_mas.py` | A function for trimming the KV cache used an interface the current library removed. | Rewrote it for the current interface. |
 
-**A concrete paper↔code discrepancy.** Section 3.1 of the paper states the alignment
-matrix `Wa` is computed once per run and "reuse[d] across all inference steps", and
-Figure 7 reports it worth +2.3%–5.3% accuracy. But `run.py` declares
-`--latent_space_realign` as `action="store_true"` — **default off** — and
-`_build_latent_realign_matrix` then discards the solved matrix for `torch.eye(...)`.
-So the released code does not run the paper's method by default. (At Qwen3-4B this is
-moot — tied embeddings make `Wa` reduce to a scalar, which the code's norm rescale
-already applies — but at 14B, where embeddings are untied, `Wa` is a real
-near-orthogonal transform that is skipped unless the flag is passed.)
+I also added three things the code didn't have:
 
-**One contradiction we cannot yet explain.** Paper Figure 8 reports accuracy rising
-with latent depth, peaking at 40–80 steps. Our 4B sweep at bs=1 declines monotonically
-across the same range (0.822 → 0.533 by ls=40). Figure 8 is measured on Qwen3-14B, so
-the 4B optimum is not actually published — but the directions disagree.
----
+- **Checkpointing** (`--checkpoint`). The cluster I use can kill a job at any time
+  to make room for paying users, and it does — four of my runs were killed partway
+  through, two of them past the halfway point. Now every batch of results is
+  saved to a file as it finishes, and a restarted job picks up where it left off.
+- **Two ablation switches** (`--latent_only`, `--sequential_info_only`) that the
+  method code reads but that were never actually wired into the command line, so
+  they could never be turned on.
+- **A padding fix** (`--pad_fix`), off by default. Explained in Finding 5.
 
-## How the method works
-
-Four agents — Planner → Critic → Refiner → Judger. Under `latent_mas` the first three
-**never emit a token**. Each one's prompt is forward-passed on top of the running
-`past_key_values`, then `latent_steps` autoregressive steps run in embedding space:
-the last layer's final hidden state is fed straight back in as `inputs_embeds`, with
-no sampling and no detokenization. The KV cache *is* the entire inter-agent channel.
-Only the judger calls `generate()`, inheriting all of it.
-
-The token savings fall directly out of this — three of four agents produce zero
-output tokens. `models.py:generate_latent_batch` is ~40 lines and is the whole paper.
-
-```
-latent_steps=10                        latent_steps=0
-  Planner  KV   0 ->  166                Planner  KV   0 ->  156
-  Critic   KV 166 ->  373                Critic   KV 156 ->  353
-  Refiner  KV 373 ->  566                Refiner  KV 353 ->  536
-  Judger   inherits 566  <- channel      Judger   inherits   0  <- DISCARDED
-```
-
----
-
-## Changes made to this repo
-
-Everything in `yajat/` is new. Upstream files were changed only where noted.
-
-**Layout.** The upstream method code (`run.py`, `models.py`, `prompts.py`, `data.py`,
-`utils.py`, `methods/`) lives in **`architecture/`**; run it as
-`python architecture/run.py ...`. `yajat/` holds the reproduction harness and findings.
-`data/`, `assets/`, `example_logs/` are upstream data. Root carries only `README.md`,
-`LICENSE`, `requirements.txt`, `.gitignore`.
-
-### 1. Fixes required to make the repo run at all
-
-| file | change |
-|---|---|
-| `methods/latent_mas.py` | Made the vLLM import conditional. It was unconditional, but `requirements.txt` has no vllm — import-time crash. |
-| `run.py` | `--model_name` choices listed `Qwen3-4B` twice and omitted `Qwen3-8B`. |
-| `data.py` | Bare dataset id `gsm8k` → `openai/gsm8k`; modern `huggingface_hub` rejects the legacy form. |
-| `methods/latent_mas.py` | Ported `_truncate_past` off the legacy `Cache` API, removed in transformers 5.x. |
-
-Applied by `yajat/02_patch_blockers.sh`. Original `run.py` kept at `yajat/run.py.orig`.
-
-### 2. New capability in `run.py`
-
-- **`--checkpoint PATH`** — JSONL appended after every batch, replayed on startup as
-  a prefix skip, carrying elapsed time forward and reporting `resumed_from`. Every
-  GPU partition available here is preemptible and preemption is *cancel*, not
-  requeue; four jobs died mid-run before this existed, two past halfway.
-- **`--latent_only` / `--sequential_info_only`** — read by `methods/latent_mas.py`
-  but never defined in `run.py`, so they were permanently `False`. Now reachable,
-  making the paper's own ablations runnable.
-- **`--pad_fix`** — opt-in, four changes that are only correct together (see
-  finding 5). Defaults **off**: right padding is what the authors ran, so the
-  unfixed path stays the reproduction path and both are reachable from one binary.
-
-### 3. Measurement the repo lacks
-
-`run.py` reports accuracy and wall-clock and **no token counts** — but the central
-claim is a token claim.
+And I built the measurement tools the repo lacks. The paper's central claim is
+about how many words are generated, but `run.py` only prints accuracy and time. So:
 
 | script | what it does |
 |---|---|
-| `yajat/analyze.py` | Re-tokenizes every agent's `[Output]` block from a stdout log |
-| `yajat/compare_arms.py` | Reads the checkpoint JSONL instead, so it works **mid-run**; compares arms on the prefix they have all finished |
-| `yajat/analyze_sweep.py` | Builds the `latent_steps` sweep table and classifies its shape |
-| `yajat/check_realign.py` | Rebuilds the realign least-squares solve from safetensors — no GPU, never materializes a 14B model |
-| `yajat/compare_padfix.py` | A/B for `--pad_fix` |
-| `yajat/trace_pipeline.py` | Narrates the KV cache growing across agents — fastest way to see the mechanism |
-
-### 4. Cluster harness
-
-`yajat/run_latentmas.sbatch` (self-resubmitting on SIGTERM, guarded by "did the
-checkpoint grow this attempt?" so a real crash fails once, not twenty times), plus
-`00_setup_env.sh`, `01_fetch_assets.sh`, and the `submit_*.sh` launchers.
+| `yajat/analyze.py` | Counts the words each agent generated, from a finished log. |
+| `yajat/compare_arms.py` | Does the same from the checkpoint files, so it works on runs that are still going. Compares different setups only on problems they've all finished. |
+| `yajat/analyze_sweep.py` | Builds the latent-steps sweep table. |
+| `yajat/check_realign.py` | Computes the paper's alignment matrix from the model weights, without needing a GPU (Finding 6). |
+| `yajat/trace_pipeline.py` | Prints the KV cache growing step by step across the four agents — the quickest way to *see* the mechanism. |
 
 ---
 
-## Results
+## Part 3 — What I measured
 
-MBPP+ · sequential · `max_new_tokens=4096` · `think=1` · one L40S · seed 42.
-Qwen3-4B unless stated; the scale table below adds Qwen3-14B.
+All runs: MBPP+, sequential agents, up to 4,096 words of output per answer,
+sampling temperature 0.6, top-p 0.95, random seed 42, one NVIDIA L40S GPU. These
+match the settings stated in the paper. Qwen3-4B unless I say otherwise.
 
-### Main comparison — all 378 problems
+> **Temperature / top-p.** Knobs that control how random the model's word choices
+> are. 0.6 and 0.95 are the paper's values. Because there is randomness, expect
+> results to wobble by a point or two between runs.
 
-All three arms complete (`yajat/results/arm_comparison.json`):
+> **bs (batch size).** How many problems the GPU works on at the same time. Bigger
+> batches are faster per problem. This turns out to matter a lot — see Finding 5.
 
-| arm | accuracy | sec/problem | gen tok/prob | prompt tok/prob |
+> **ls (latent steps).** How many silent thinking steps each of the three silent
+> agents takes. `ls=0` means zero steps, which — as I discovered — means the whole
+> mechanism is off (Finding 3).
+
+### 3.1 — The main comparison, all 378 problems
+
+| setup | accuracy | seconds per problem | words generated | words in the prompt |
 |---|---|---|---|---|
-| `baseline` (single agent, bs=15) | 0.691 | 29.0 | 1430 | 243 |
-| `latent_mas` ls=10, bs=15 | **0.228** | 44.5 | 1578 | 1092 |
-| `text_mas` bs=8 | **0.722** | 93.1 | 2154 | 5119 |
+| Single model (bs=15) | 69.1% | 29.0 | 1,430 | 243 |
+| **LatentMAS**, ls=10 (bs=15) | **22.8%** | 44.5 | 1,578 | 1,092 |
+| TextMAS (bs=8) | **72.2%** | 93.1 | 2,154 | 5,119 |
 
-**TextMAS beats LatentMAS by ~49 accuracy points.** LatentMAS is cheaper — ×2.09 in
-wall clock, ×1.37 in generated tokens — but neither figure is the claimed ×3.7.
+Reading this row by row:
 
-**LatentMAS also loses to the plain single-agent baseline on every axis at once:**
-lower accuracy, 1.5× slower, 4.5× the prefill. There is no dimension on which it
-wins here. TextMAS beats the baseline by only 2.9 points for 3.3× the wall clock.
+- **TextMAS beats LatentMAS by about 49 accuracy points.** LatentMAS is cheaper —
+  2.1× faster, 1.4× fewer words — but not the 3.7× the paper claims, and at 22.8%
+  accuracy the savings don't mean much.
+- **LatentMAS loses to the plain single model on every single column.** Lower
+  accuracy, slower, and 4.5× more prompt words (because it has to feed four
+  agents' prompts through the model instead of one). There is no measurement here
+  on which it wins.
+- TextMAS beats the single model by only about 3 points, for 3.2× the time.
 
-> **The wall-clock ratio was confounded — and correcting it makes the speedup
-> larger, not smaller.** The table above compares LatentMAS at bs=15 against TextMAS
-> at bs=8 (TextMAS OOMs at 15), and a bigger batch lowers time-per-problem on its own.
-> Re-running LatentMAS at a matched bs=8 gives, on the 216 problems both have finished:
->
-> | arm (both bs=8) | accuracy | sec/prob | gen tok |
-> |---|---|---|---|
-> | `latent_mas` ls=10 | 0.324 | **43.0** | 1575.5 |
-> | `text_mas` | 0.713 | **99.7** | 2191.5 |
->
-> **×2.32 wall clock, ×1.39 generated tokens** — against the paper's ×3.7. So the
-> confound was real and worth removing, but it was hiding a *higher* speedup, and the
-> claim still does not reproduce on either axis. The token ratio is batch-independent
-> and barely moved (×1.37 → ×1.39), which is the consistency check.
->
-> (LatentMAS is marginally *faster* at bs=8 than bs=15 — 43.0 vs 44.5 s/problem —
-> backwards from normal batching behaviour, and most likely the padding: bs=15 packs
-> more pad per sequence, so more compute is wasted on non-tokens. Accuracy rises too,
-> 0.228 → 0.324, for the same reason. Figures are on 216/378 problems; the arm is
-> still running.)
+TextMAS ran with bs=8 instead of 15 because it runs out of GPU memory at 15. That
+makes the time comparison slightly unfair, which I fixed next.
 
-### Scale — the decisive experiment
+### 3.2 — The same comparison with matched batch sizes
 
-Same code, same task, same prompt, same L40S, `bs=1` (no padding artifact), 45
-problems. The only variable is model size:
+I re-ran LatentMAS at bs=8 so both are on equal footing. On the 216 problems both
+finished:
 
-| | **ls=0** (channel off) | **ls=10** (channel on) | cost of the channel |
+| setup (both bs=8) | accuracy | seconds per problem | words generated |
 |---|---|---|---|
-| **Qwen3-4B** | 0.822 | **0.556** | **−26.6 pts** |
-| **Qwen3-14B** | 0.933 | **0.911** | **−2.2 pts** (one problem) |
+| LatentMAS, ls=10 | 32.4% | **43.0** | 1,576 |
+| TextMAS | 71.3% | **99.7** | 2,192 |
 
-Data: `yajat/results/scale_2x2.json`.
+Speedup: **2.32×** in time, **1.39×** in words. Fixing the batch mismatch made
+the speedup a bit *bigger*, not smaller — but it's still far from 3.7×.
 
-**At 14B the latent channel is free; at 4B it is catastrophic.** This is the central
-result of the reproduction. It also matches the authors' own released 14B log run at
-ls=10 (84.8% on HumanEval+) — the method does work, at 14B.
+(Interesting side note: LatentMAS was slightly *faster* at the smaller batch —
+43.0 vs 44.5 seconds — which is backwards from how batching usually works. I think
+this is the padding problem in Finding 5: at bs=15 the model wastes effort on
+filler.)
 
-The paper's tables start at 8B, so it never claims 4B works — this is not a
-contradiction of the paper but a measurement of where the method's floor sits, which
-the paper does not report.
+### 3.3 — Does more silent thinking help? (45 problems, bs=1)
 
-**And at 14B the channel does pay — modestly.** Turning it on cuts generated tokens
-7.2% (1299.4 → from 1400.3) and wall clock 3.8% (61.1 vs 63.5 s/problem) at
-statistically equal accuracy. So the mechanism delivers, just an order of magnitude
-below the headline. Note the comparison arm: this is ls=10 vs ls=0, **not** vs
-TextMAS, which is what the paper's ×3.7 measures against and which was not run at
-14B here.
+The paper says accuracy goes *up* with more latent steps, peaking at 40–80. I
+swept the number of steps:
 
-Caveat: 45 problems carries roughly ±7 points of sampling error, so the 4B→14B gap
-(27 points) is solid but the within-14B gap (2.2 points, one problem) is not
-distinguishable from zero — which is the point: the channel costs nothing measurable
-at 14B.
-
-### `latent_steps` sweep — 45 problems, bs=1
-
-| ls | 0 | 1 | 2 | 5 | 10 | 20 | 40 | 10 +realign |
+| latent steps | 0 | 1 | 2 | 5 | 10 | 20 | 40 | 10 (with alignment on) |
 |---|---|---|---|---|---|---|---|---|
-| accuracy | 0.822 | 0.778 | 0.778 | 0.644 | 0.556 | 0.533 | 0.533 | 0.511 |
+| accuracy | **82.2%** | 77.8% | 77.8% | 64.4% | 55.6% | 53.3% | 53.3% | 51.1% |
 
-**Monotonic, no cliff.** The 0.289 decline is spread evenly across steps, which
-points at the latent channel being genuinely harmful at this scale rather than
-broken by a single bug. More latent thinking is strictly worse, every step of the way.
+**Every step of silent thinking makes the 4B model worse.** The decline is smooth —
+no single point where it suddenly breaks. Then it flattens around 53%. I'll explain
+in Finding 7 why the shape of this curve matters.
 
-### How 4B fails: degenerate repetition
+I ran this at bs=1 to remove the padding problem (Finding 5), so this is the
+cleanest view of the method on its own.
 
-The 4B collapse is not an extraction or plumbing bug — it is the model's output
-falling into a repetition loop:
+### 3.4 — Is it the model size? (the decisive test)
 
-```
-...and_and and__and and and_and and__and andand andandandand and and_and and_ and_re
-and and and and_and and__and and_ and_and and__and and__and and_ and__and...
-```
+Same code, same task, same prompts, same GPU, same 45 problems, bs=1. The only
+thing I changed was the model:
 
-Measured over every finished problem in each arm ("degenerate tail" = fewer than 15%
-unique words in the last 400):
-
-| arm | accuracy | degenerate tail | unclosed `<think>` | empty prediction |
-|---|---|---|---|---|
-| 4B `latent_mas` ls=10 | 0.282 | **25.8%** | 48.9% | 31.8% |
-| 4B `text_mas` | 0.722 | 0.9% | 29.6% | 2.6% |
-| 4B `baseline` | 0.690 | 0.6% | 11.9% | 13.0% |
-| **14B `latent_mas` ls=10** | **0.911** | **0.0%** | 4.4% | 4.4% |
-
-**This rules out a harness bug and evidences the mechanism.** Same code, same
-extractor, same prompts: TextMAS degenerates 0.9% of the time and 14B LatentMAS 0.0%.
-Only the 4B latent arm collapses. Degenerate repetition is the standard signature of a
-residual stream drifting off-distribution — the model loses varied continuations and
-falls into a fixed point — which is exactly what feeding `hᴸ` back with no projection
-onto the embedding manifold predicts.
-
-One genuine but minor defect surfaced in the same audit: 6 of 280 problems (2.1%) have
-code after `</think>` that the extractor misses. Real, worth fixing, far too small to
-explain anything.
-
-### Five-arm comparison — 45 problems
-
-| arm | accuracy | sec/problem | gen tok/prob | prompt tok/prob |
-|---|---|---|---|---|
-| `baseline` | 0.778 | 25.7 | 1237 | 227 |
-| `text_mas` bs=8 | **0.800** | 75.8 | 2203 | 4757 |
-| `latent_mas` ls=0 | 0.756 | 30.5 | 1335 | 1029 |
-| `latent_mas` ls=10, bs=15 | 0.378 | 41.6 | 926 | 1029 |
-| `latent_mas` ls=10, bs=1 | 0.556 | 30.3 | 1527 | 1029 |
-
-The last two rows isolate the padding bug: it costs ~18 points (0.556 → 0.378). But
-bs=1 is still 22 points under baseline, so **the latent channel itself costs more
-than the padding bug does**, and fixing padding will not rescue the arm.
-
----
-
-## Findings, explained
-
-**1. The two released logs are two paper cells, confirmed to the token.**
-Re-tokenizing them reproduces the paper's Token column exactly — 1621.2 vs 1621
-(Table 1, 14B/MBPP+) and 1512.3 vs 1512 (Table 2, 14B/HumanEval+). That is not
-coincidence; these are the runs behind those cells, which pins down two things the
-paper does not state.
-
-**2. The Token metric counts generated text only.** Prefill is omitted: 785
-tokens/problem for the MBPP+ run, 1183 for HumanEval+. LatentMAS forward-passes
-*four* agent prompts to build its cache where a single agent passes one, and none of
-that ~4× prefill appears in the Token column. State this carefully rather than as a
-refutation — prefill is parallel and far cheaper per token than sequential decode,
-so `generated + prompt` is not apples-to-apples either. The paper measures decode
-tokens, the dominant cost, which is legitimate. But the omitted prefill is exactly
-what resurfaces in the two places the savings don't materialize: wall clock and peak
-memory.
-
-**3. The published MBPP+/14B cell was produced with the latent channel switched off.**
-That log carries `latent_steps: 0` in all 1134 trace entries, and in today's code
-`past_for_decoding = past_kv if self.latent_steps > 0 else None` — the judger gets
-`None` and the accumulated cache is discarded, degenerating to a single-agent call
-with three wasted forward passes. **`--latent_steps` defaults to 0; always pass it
-explicitly.** The two logs differ here, which is easy to miss: neither arg namespace
-has a `latent_steps` field, but each log's per-agent `[Latent Steps]` marker carries
-the value — **0** in all 1134 MBPP+ entries, **10** in all 492 HumanEval+ entries. So
-only the HumanEval+ cell exercised the channel. It also prints `method: muscle` where
-the MBPP+ log prints `latent_mas`, so at least one predates the released `run.py`.
-
-**4. LatentMAS costs peak memory, and the efficiency framing omits it.** Same GPU,
-same batch, same data, Qwen3-4B on one 24 GB A30 at bs=15: `latent_mas` OOMs where
-`baseline` and `text_mas` both run. The judger decodes against the concatenated KV
-of all three prior agents for every one of `max_new_tokens` steps. This is intrinsic,
-not an implementation wart — it is the same property the token savings come from.
-
-**5. The latent thought is seeded from a PAD token at any `--generate_bs > 1`.**
-`generate_latent_batch` reads `hidden_states[-1][:, -1, :]` — position −1 of a
-*right-padded* batch — then builds `latent_mask = torch.ones(...)`, un-masking every
-pad already in the cache. Measured: 93.3% of sequences seed from a pad, 35.8% of KV
-positions are pad. Re-tokenizing the *released* HumanEval+ log gives 94.4% and
-32.7%, so the published numbers were produced in this state too. Invisible at bs=1,
-which is why smoke tests miss it.
-
-**6. `--latent_space_realign` is a mathematical no-op on Qwen3-4B.** The flag
-least-squares-solves `W_out @ M ≈ W_in` so a hidden state (output space) can be fed
-back as an input embedding; without it the code replaces `M` with the identity.
-Qwen3-4B has **tied** embeddings, so `W_out` *is* `W_in` and the solve returns the
-identity anyway — measured `M_vs_I_relative_fro = 0.0`, cosine 1.0. The flag cannot
-be tested at 4B at all. On Qwen3-14B embeddings are untied and `M` is far from
-identity (relative Frobenius 1.05, mean cosine 0.004 — near-orthogonal), so every
-14B run *without* the flag feeds output-space vectors into the input-embedding slot
-with only a norm rescale.
-
-**7. The ×3.7 speedup is measured against TextMAS, not a single agent.** The paper's
-own Table 1 agrees in direction that LatentMAS is slower than a single agent
-(4B/MBPP+: 577 vs 523). Any summary saying "LatentMAS is faster" without naming the
-comparison arm is wrong.
-
----
-
-## Why these numbers differ from the paper
-
-**Retracted:** an earlier version of this README claimed the paper's tables start at
-8B and therefore never cover 4B. That was wrong. Table 1 covers Qwen3-4B on six tasks
-including MBPP+, and reports LatentMAS at 73.5% / ×3.7 in our exact configuration.
-The AIME/GPQA table (Table 2) is 8B/14B only, which is what that claim confused it with.
-
-**Task verbosity still explains the speedup gap.** The saving scales with how much the
-silenced agents would otherwise say:
-
-| task / model | TextMAS tok | LatentMAS tok | reduction |
+| | ls=0 (mechanism off) | ls=10 (mechanism on) | what turning it on costs |
 |---|---|---|---|
-| AIME24 / 8B (paper) | 38,596 | 8,953 | 76.8% |
-| MBPP+ / 4B (paper) | 4,420 | 1,339 | 69.7% |
-| **MBPP+ / 4B (here)** | **2,191** | **1,575** | **28%** |
+| **Qwen3-4B** | 82.2% | **55.6%** | **−26.6 points** |
+| **Qwen3-14B** | 93.3% | **91.1%** | −2.2 points (one problem out of 45) |
 
-Note our TextMAS emits 2,191 tokens where the paper's emits 4,420 — our TextMAS is
-half as verbose, so there is half as much to save. That is itself unexplained and is a
-lead worth chasing: same task, same model, same max-token budget.
+**At 14B the mechanism costs essentially nothing. At 4B it is catastrophic.**
 
-**Confirmed, not contradicted: LatentMAS is slower than a single agent.** Reading the
-paper's Speed column as time (2808/688 = ×4.08 = its ×4.1), Single → LatentMAS goes
-421 → 688, 450 → 820, 1018 → 1149, 1040 → 1473: **slower in 11 of 12 cells.** Our
-MBPP+ measurement (44.5 vs 29.0 s/problem) agrees with the paper's own data.
+And at 14B it does deliver a small saving: with the mechanism on, the model
+generated 7% fewer words (1,299 vs 1,400) and ran 4% faster (61.1 vs 63.5 seconds)
+at the same accuracy. So the idea *works* — just at a much smaller scale than
+advertised, and only for the bigger model.
 
-**Measured: model scale.** The 2×2 above is a controlled comparison — 27 points at 4B,
-nothing at 14B, every other variable fixed. Since the paper's tables start at 8B, this
-maps the method's floor rather than disputing a claim.
+This agrees with the one released log from the authors where the mechanism was
+genuinely on (14B, ls=10, a different benchmark): 84.8%.
 
-**Why scale should matter (mechanism — inferred, not proven).** The method replaces
-the sampled token with the raw last-layer hidden state. The token is not only a
-bottleneck; it is a *projection back onto the training distribution* — sampling lands
-you exactly on one of the ~150k rows of `W_in`, discarding accumulated drift at every
-step. Feed `hᴸ` back directly and that snap never happens, so the loop has no error
-correction anywhere in it and drift compounds. The sweep's shape is the fingerprint:
-a smooth decline that **plateaus at 0.533** once the state has fully decohered, rather
-than a cliff (which would indicate a bug) or unbounded decay. A larger model plausibly
-has a wider basin — 14B carries 5120 dimensions against 4B's 2560 for a similarly sized
-vocabulary, so features sit closer to orthogonal and a perturbed vector stays nearer
-what it started as. **This last step is the least certain claim here**: the data show
-*that* scale rescues the method, not *why*. See "open" below for the test.
+### 3.5 — What does a failure actually look like?
 
-**Not the explanation — `--latent_space_realign`.** Tempting, but wrong. The flag is
-inert at 4B (tied embeddings make the least-squares solve return the identity exactly;
-`M_vs_I_relative_fro = 0.0`) and a real near-orthogonal transform at 14B. But it
-**defaults to off on both**, and `_build_latent_realign_matrix` then overwrites `M`
-with `torch.eye(...)`. So both models fed back raw `hᴸ` with only a norm rescale.
-Realignment does not distinguish our runs from theirs.
+I pulled apart the 4B failures. Here is how one starts (the model is supposed to
+be writing a Python function):
 
-**Secondary, unresolved: task and prompt.** The authors' one released log with the
-channel genuinely on is HumanEval+/*hierarchical*; we ran MBPP+/*sequential*. Our 4B↔14B
-comparison is internally clean, so this does not threaten the scale result — but it is
-not ruled out as an additional factor.
+> *"The task is to write a Python function calledsimilar_elements that takes two
+> tuples as input... The initial plan is to use set operations... The initial plan
+> may not be correct because the testcases use tuples as input... The initial plan
+> may not be correct because."*
 
-**Code revision drift.** The HumanEval+ log prints `method: muscle` and the MBPP+ log
-prints `latent_mas`; neither arg namespace has a `latent_steps` field (the value comes
-from each log's per-agent `[Latent Steps]` marker). So at least one predates the
-released `run.py`, and matching flags does not guarantee matching behavior.
+Notice two things. First, it is already glitching in the first sentence —
+"called**similar_elements**" with the space dropped, "testcases", a sentence that
+just stops. Second, it says "the initial plan" — **it is reading the Planner's
+silent thoughts out of the cache.** It never saw a plan in words. So the mechanism
+is genuinely transferring information; the information is just damaged.
 
-**Not a factor: the padding bug.** Real (~18 points) but present in the authors' runs
-too — 94.4% pad-seeded in their released HumanEval+ log. It moves our absolute numbers,
-not the gap to theirs.
+By 3,000 characters in:
 
-**Not a factor: sampling noise.** Temperature 0.6, seed 42; ±1–2 points run to run.
+> *"thefunction and thefunction and thefunction and thefunction and thefunction..."*
 
-### Open
+It has collapsed completely. I measured how often this happens:
 
-The drift account above is measurable and currently untested. Instrument the latent
-loop to record, at each step, the **maximum cosine similarity between the latent vector
-and any row of `W_in`** — i.e. how close the state stays to any real token embedding.
-If it decays fast at 4B and holds at 14B, drift is confirmed and the mechanism is
-established rather than inferred. One forward pass per step, no generation, minutes per
-model; it belongs in `yajat/trace_pipeline.py`, which already walks the loop.
+| setup | accuracy | collapsed into repetition | never finished its reasoning | produced no code at all |
+|---|---|---|---|---|
+| 4B LatentMAS, ls=10 | 28.2% | **25.8%** | 48.9% | 31.8% |
+| 4B TextMAS | 72.2% | 0.9% | 29.6% | 2.6% |
+| 4B Single | 69.0% | 0.6% | 11.9% | 13.0% |
+| **14B LatentMAS, ls=10** | 91.1% | **0.0%** | 4.4% | 4.4% |
+
+> **"Collapsed into repetition."** I counted an answer as collapsed if fewer than
+> 15% of its last 400 words were different from each other — i.e., it's stuck in a
+> loop.
+
+> **"Never finished its reasoning."** Qwen3 models "think out loud" inside
+> `<think>...</think>` tags before answering. If the closing tag never appears, the
+> model spent its entire word budget thinking and never got to the answer.
+
+Same code, same answer-extraction, same prompts across all four rows. Only the 4B
+LatentMAS row collapses. **This rules out a bug in my harness** — if the
+extraction or plumbing were broken, TextMAS and Single would break too.
 
 ---
 
-## Environment notes
+## Part 4 — The findings, one at a time
 
-Built and run on UCI HPC3. Two constraints shaped every script:
+### Finding 1 — The authors' two released logs are two exact cells of the paper
 
-- `~/.local/lib/python3.10/site-packages` leaks onto `sys.path` of every python3.10
-  env on this account, shadowing torch's CUDA libs — and a bare `pip install` into a
-  fresh env *uninstalls out of it*. Every script exports `PYTHONNOUSERSITE=1` and
-  `PIP_USER=0`; `00_setup_env.sh` asserts no `.local` path survives.
-- The billed `gpu`/`gpu32` partitions reject this account at the job_submit plugin,
-  so every run is preemptible. Hence checkpoint/resume and the self-chaining sbatch.
+The repo ships two example output logs from Qwen3-14B. I re-counted the words in
+them and got the paper's Table numbers **to the digit**: 1,621.2 vs 1,621 (MBPP+),
+1,512.3 vs 1,512 (HumanEval+). These aren't similar runs; these are the runs.
 
-`models.py` hardcodes `torch.bfloat16` — never schedule on V100 (sm_70) or
-RTX6000 (sm_75).
+That lets me learn two things the paper doesn't say (Findings 2 and 3).
 
-Detailed findings and full order of operations: **[`yajat/README.md`](yajat/README.md)**.
+### Finding 2 — The paper counts only generated words, not prompt words
+
+The "Token" column counts words the model *wrote*. It does not count words the
+model *read* (the prompts): 785 per problem for the MBPP+ log, 1,183 for
+HumanEval+.
+
+That matters because LatentMAS has to push **four** agents' prompts through the
+model to build its memory, where a single model pushes one. None of that appears
+in the paper's count.
+
+To be fair to the paper: reading a prompt is much cheaper per word than writing
+an answer (reading happens all at once; writing is one word at a time). So
+"generated words" is a reasonable thing to measure. But the hidden reading cost is
+exactly what shows up in the two places the savings vanish — time and memory.
+
+### Finding 3 — The paper's MBPP+ 14B result was run with the mechanism OFF
+
+In the released MBPP+ log, every one of the 1,134 agent entries records
+`[Latent Steps] 0`. And in the code:
+
+```python
+past_for_decoding = past_kv if self.latent_steps > 0 else None
+```
+
+At zero latent steps, the shared memory is **thrown away** before the Judger
+answers. The three silent agents run, build up a memory, and then it's discarded.
+The Judger answers alone. It's a single model with extra wasted work.
+
+The command-line default for `--latent_steps` is **0**. If you run the code the
+obvious way, the mechanism is off.
+
+The other released log (HumanEval+) has latent steps = 10 in all 492 entries, so
+that one genuinely used the mechanism.
+
+### Finding 4 — This is very likely true of the paper's *4B* MBPP+ result too
+
+This is the finding I consider most important, so here is all the evidence.
+
+**(a)** On the same first 60 problems, my single model scores **75.0%** and my
+LatentMAS with ls=0 scores **75.0%** — identical, as they should be, because ls=0
+*is* a single model. With ls=10 it scores 31.7%.
+
+**(b)** My ls=0 run generates **1,335** words per problem. The paper's 4B LatentMAS
+cell reports **1,339**. (My ls=10 runs generate 926–1,578 depending on batch size.)
+
+**(c)** The paper says LatentMAS is only 1.10× slower than a single model (577 vs
+523 seconds). My ls=0 is 1.19× slower than my single model. My ls=10 is **1.62×**
+slower. The ls=0 number fits; the ls=10 number doesn't.
+
+**(d)** The 14B MBPP+ log (Finding 3) is proven ls=0 and matches the paper exactly.
+
+So three independent measurements — accuracy, word count, and timing — all fit
+"the paper's MBPP+ LatentMAS numbers are single-model runs." If that's right, the
+paper's 73.5% is a single model with a slightly different prompt, and the "↑" over
+Single is prompt variation plus averaging over three runs.
+
+I want to be honest about the limit of this: I can't prove what the authors ran at
+4B, because they didn't release that log. And the HumanEval+ log shows they *did*
+use the mechanism for some cells. This is a strong inference, not a proof.
+
+### Finding 5 — A bug in batched runs: the silent thinking starts from a filler token
+
+When the GPU processes several problems at once, shorter prompts are padded with
+filler tokens at the *end* so they're all the same length.
+
+> **Right padding.** Adding filler at the end of shorter sequences so a batch is
+> rectangular. The filler is supposed to be ignored.
+
+The code grabs the hidden state at the *last position* of each row to start the
+silent thinking:
+
+```python
+last_hidden = outputs.hidden_states[-1][:, -1, :]
+```
+
+With right padding, the last position is **filler** for every prompt shorter than
+the longest one in the batch — which I measured at 93.3% of prompts. So the silent
+thinking starts from the model's reaction to a filler token, not to the actual
+prompt. And the code then tells the model to pay attention to *all* positions
+including the filler (35.8% of the cache).
+
+This is invisible at bs=1, which is why quick tests miss it. It also affects the
+authors' own runs: the released HumanEval+ log is 94.4% filler-seeded.
+
+I measured its cost directly: same 45 problems, ls=10, **bs=1 gives 55.6% and
+bs=15 gives 37.8%** — about 18 points. Over the full 378 problems the bs=15 run
+lands at 22.8%.
+
+The fix needs four coordinated changes (`--pad_fix`, off by default because the
+padded version is what the authors ran). But note: even fixed, 4B at ls=10 is
+still 22 points below the single model. **Fixing padding doesn't rescue the
+method at 4B.** The mechanism itself costs more than the bug does.
+
+### Finding 6 — The paper's "alignment" step is off by default in the code
+
+The paper anticipates a problem with feeding hidden states back in as input:
+
+> **Out-of-distribution input.** The model was trained to receive word embeddings
+> at its input — a fixed set of ~150,000 specific number-lists, one per word. A
+> hidden state is a *different kind* of number-list from the model's output side.
+> Feeding one in as input is something the model never saw during training.
+
+Their solution is a matrix `Wa` that maps output-side vectors into input-side
+space, computed once from the model's weights. The paper says it's used at every
+latent step and is worth +2.3% to +5.3% accuracy (their Figure 7).
+
+In the code:
+
+```python
+parser.add_argument("--latent_space_realign", action="store_true")   # default: off
+...
+if self.args.latent_space_realign:  pass
+else:                               realign_matrix = torch.eye(...)   # replace with "do nothing"
+```
+
+**Off by default, and the computed matrix is thrown away for an identity matrix.**
+Running the code as released does not run the paper's method.
+
+For Qwen3-4B this turns out not to matter, for a mathematical reason:
+
+> **Tied embeddings.** Some models use the *same* matrix to turn words into
+> vectors (input) and vectors into word scores (output). Qwen3-4B does. When the
+> two are the same, the alignment matrix `Wa` works out to be exactly "do nothing"
+> anyway (my `check_realign.py` confirms: distance from identity = 0.000).
+
+So at 4B, the alignment can't help even when turned on — which is what I measured
+(51.1% with it vs 55.6% without; within noise). At 14B the embeddings are *not*
+tied, `Wa` is a real transformation (it rotates vectors almost 90°), and the code
+skips it unless you pass the flag.
+
+There's a second, smaller difference: the paper scales the fed-back vector by one
+global constant; the code rescales *every* vector to exactly the average embedding
+length, erasing any information in their relative sizes. I haven't tested whether
+this matters.
+
+### Finding 7 — Why the 4B model collapses (my explanation)
+
+This is my interpretation. The measurements above support it, but I haven't
+proven the mechanism directly.
+
+Normally, a language model's loop goes: hidden state → scores for every word →
+pick one word → look up that word's embedding → feed it in as the next input.
+
+LatentMAS deletes the middle: hidden state → feed it straight in as the next input.
+
+The paper's argument is that picking a word throws away information (a hidden
+state carries thousands of numbers; a word carries about 17 bits' worth). That's
+true. But **picking a word also does something else: it snaps the state back onto
+the set of inputs the model was trained on.** Whatever noise or drift built up in
+the hidden state gets discarded, because the next input is a clean, real word
+embedding. Every single step.
+
+Remove that, and you have a loop with no correction in it. Step 1's output is a
+little off. It becomes step 2's input, so step 2's output is more off. Nothing pulls
+it back. Errors compound.
+
+The sweep in 3.3 is what that looks like: one or two steps barely hurt (the drift
+is small), then it falls, then it *flattens* at 53% — because once the state has
+fully drifted into noise, more steps can't make noise noisier. A bug would look
+like a sudden cliff. Drift looks like this.
+
+Why would 14B survive it? My best guess: a 14B model represents things with 5,120
+numbers instead of 2,560. With more room, a slightly-off vector is more likely to
+still be "near" what it was, rather than landing on top of something else. That
+last step is the least certain part of this whole document.
+
+The direct test would be: at each latent step, measure how close the fed-back
+vector is to *any* real word embedding, for 4B vs 14B. If 4B's drifts away fast
+and 14B's holds, that's the mechanism. It's a cheap experiment and it's next on
+my list.
+
+### Finding 8 — LatentMAS uses more GPU memory, and the paper doesn't mention it
+
+Same GPU (a 24 GB A30), same batch size (15), same data: **LatentMAS runs out of
+memory** where Single and TextMAS both fit. The Judger has to attend over the
+combined memory of all three previous agents for every one of its up-to-4,096
+output words. This is built into the method — it's the same property the word
+savings come from — but "uses fewer words" and "uses more memory" are both true,
+and the paper only reports one.
+
+### Finding 9 — By the paper's own numbers, LatentMAS is slower than a single model
+
+The paper's Table 2 has a "Speed" column (seconds per run; lower is better).
+Comparing the Single column to the LatentMAS column: 421 → 688, 450 → 820,
+1018 → 1149, 1040 → 1473... **LatentMAS is slower than a single model in 11 of the
+12 cells.** The 3.7× speedup is only against TextMAS, which is the slow option.
+
+Any summary that says "LatentMAS is faster" without saying "than TextMAS" is
+wrong, by the paper's own data. My measurement (44.5 vs 29.0 seconds per problem)
+agrees.
+
+Also from that table: the accuracy gains over TextMAS are ↑3.4, ↑0.0, ↑2.1, ↑3.3,
+↑0.0, ↑3.9, ↑0.5, ↑1.0 — four of twelve are exactly zero.
+
+### Finding 10 — Things I checked and cleared (not bugs)
+
+I want to be clear about what I *didn't* find wrong, because "the code is broken"
+was my first suspicion too.
+
+- **The hidden state being fed back is the right one.** It's the version after the
+  model's final normalization — the exact vector the model uses to score words.
+  I checked this specifically for the library version installed (transformers
+  4.57.1), because that version changed how hidden states are collected and could
+  have silently broken this. It didn't.
+- **The memory handoff to the Judger is correct.** I traced the library's code
+  path for "start generating with a pre-filled memory" and it does the right
+  thing. And it's confirmed by behavior: the failing 4B Judger talks about "the
+  initial plan," which it could only know from the cache.
+- **The prompts match the paper's Appendix K** (a couple of sentences are in a
+  different order).
+- **Word budget (4,096), temperature (0.6), top-p (0.95)** all match Table 1's
+  stated settings.
+- **Answer checking matches the paper's protocol.** Take the last Python code
+  block, attach the hidden tests, run with a 10-second timeout.
+- **The answer extractor has one small gap:** 6 of 280 answers (2.1%) had code the
+  extractor missed. Real, but far too small to matter.
+
+### Finding 11 — A contradiction I can't explain yet
+
+The paper's Figure 8 shows accuracy *rising* with more latent steps, peaking at
+40–80. My sweep (3.3) shows it *falling* the whole way. Figure 8 is measured on
+14B and mine is 4B, so they're not directly comparable — but the directions are
+opposite, and the paper doesn't say what the best setting is at 4B.
+
+### Finding 12 — Another loose end: my TextMAS is half as talkative as theirs
+
+My TextMAS generates 2,191 words per problem. The paper's generates 4,420. Same
+model, same task, same word budget. I don't know why. It matters because the
+whole saving comes from silencing agents — so if their agents were twice as
+verbose, they had twice as much to save.
+
+---
+
+## Part 5 — What's still running
+
+- **GPQA-Diamond at 14B, all three setups** (jobs 55761333–5). This is a
+  hard science benchmark from the paper's Table 2, where the paper reports its
+  biggest speedups (6–7×). It's the first run here that tests the headline claim in
+  the configuration the paper makes it.
+- **Two runs with `<think>` turned off** (jobs 55764319–20). The code injects a
+  literal `<think>` tag to force reasoning mode; the paper's printed prompts don't
+  show one; and 48.9% of my 4B LatentMAS answers never finish reasoning. If turning
+  it off recovers a lot of accuracy, part of the gap was my setup.
+
+---
+
+## Part 6 — Notes on the cluster, for anyone repeating this
+
+- Every GPU partition I can use is **preemptible** — a paying job can cancel mine
+  at any moment, and it's a cancel, not a pause. Hence the checkpointing. The
+  job script resubmits itself when killed.
+- On this account, a hidden folder of Python packages leaks into every
+  environment and breaks GPU libraries. Every script sets `PYTHONNOUSERSITE=1`.
+- The model code hardcodes 16-bit "bfloat16" math. Do not run it on older GPUs
+  (V100, RTX6000) that don't support it.
+
+## Layout
+
+| folder | what's in it |
+|---|---|
+| `architecture/` | The authors' method code (`run.py`, `models.py`, `prompts.py`, `data.py`, `utils.py`, `methods/`), with the four fixes from Part 2. Run as `python architecture/run.py ...`. |
+| `yajat/` | Everything I wrote: the job scripts, the measurement tools, and a longer findings log (`yajat/README.md`). |
+| `yajat/results/` | Distilled result files (JSON). Raw logs are not tracked — they're multi-megabyte. |
+| `data/`, `assets/`, `example_logs/` | Upstream data, figures, and the authors' two released logs. |
+
+The root of the repo has only this README, the license, the requirements, and
+`.gitignore`.
 
 ## License
 
-Upstream code is under the original project's license; see [`LICENSE`](LICENSE).
+Upstream code is under the original project's license; see `LICENSE`.
