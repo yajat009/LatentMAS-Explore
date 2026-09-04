@@ -110,6 +110,10 @@ class LatentMASMethod:
 
         batch_size = len(items)
         past_kv: Optional[Tuple] = None
+        # Runs alongside past_kv and marks which of its positions are real. Only
+        # consulted under --pad_fix; without it generate_latent_batch keeps the
+        # original all-ones behaviour.
+        past_mask: Optional[torch.Tensor] = None
         agent_traces: List[List[Dict]] = [[] for _ in range(batch_size)]
         final_texts = ["" for _ in range(batch_size)]
 
@@ -152,17 +156,23 @@ class LatentMASMethod:
                     active_ids = ids_row[mask_row.bool()].tolist()
                     wrapped_tokens_batch.append(self.model.tokenizer.convert_ids_to_tokens(active_ids))
 
-                past_kv = self.model.generate_latent_batch(
+                past_kv, past_mask = self.model.generate_latent_batch(
                     wrapped_ids,
                     attention_mask=wrapped_mask,
                     latent_steps=self.latent_steps,
                     past_key_values=past_kv,
+                    past_attention_mask=past_mask,
                 )
                 if self.sequential_info_only or self.latent_only:
                     new_past_len = _past_length(past_kv)
                     tokens_added = new_past_len - prev_past_len
                     tokens_to_keep = self.latent_steps if self.latent_only else tokens_added
                     past_kv = self._truncate_past(past_kv, tokens_to_keep)
+                    # The mask indexes the cache, so it has to lose the same
+                    # positions the cache just lost or the two fall out of step.
+                    if past_mask is not None:
+                        kept = _past_length(past_kv)
+                        past_mask = past_mask[:, -kept:] if kept > 0 else None
 
                 for idx in range(batch_size):
                     mask = wrapped_mask[idx].bool()
@@ -181,6 +191,7 @@ class LatentMASMethod:
             else:
 
                 past_for_decoding = past_kv if self.latent_steps > 0 else None
+                past_mask_for_decoding = past_mask if self.latent_steps > 0 else None
 
                 if self.args.think:
                         judger_prompts = [f"{prompt}<think>" for prompt in prompts]
@@ -206,6 +217,7 @@ class LatentMASMethod:
                     temperature=self.temperature,
                     top_p=self.top_p,
                     past_key_values=past_for_decoding,
+                    past_attention_mask=past_mask_for_decoding,
                 )
                 for idx in range(batch_size):
                     final_text = generated_batch[idx].strip()
