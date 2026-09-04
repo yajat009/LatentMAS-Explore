@@ -39,21 +39,28 @@ def instrument(model: ModelWrapper):
     orig_latent = model.generate_latent_batch
     orig_text = model.generate_text_batch
 
-    def generate_latent_batch(input_ids, attention_mask=None, *, latent_steps, past_key_values=None):
+    def generate_latent_batch(input_ids, attention_mask=None, **kw):
         state["agent"] += 1
+        latent_steps = kw.get("latent_steps", 0)
+        past_key_values = kw.get("past_key_values")
         n_prompt = int(attention_mask.sum(dim=1)[0].item()) if attention_mask is not None else input_ids.shape[1]
         before = _past_length(past_key_values)
-        past = orig_latent(
-            input_ids, attention_mask=attention_mask,
-            latent_steps=latent_steps, past_key_values=past_key_values,
-        )
+        # **kw and the tuple unpack keep this working on both the reproduction
+        # branch and fix/right-padding, where the function also returns its mask.
+        ret = orig_latent(input_ids, attention_mask=attention_mask, **kw)
+        past, mask = ret if isinstance(ret, tuple) else (ret, None)
         after = _past_length(past)
         print(f"  KV cache in            : {before:6d} positions")
         print(f"  + prompt forward-passed: {n_prompt:6d} tokens   (prefill on top of the inherited cache)")
         print(f"  + latent steps         : {latent_steps:6d} positions (embedding-space, NO sampling, NO detokenization)")
         print(f"  KV cache out           : {after:6d} positions  (delta {after - before:+d})")
         print(f"  TEXT TOKENS EMITTED    : {0:6d}   <-- this agent produces no text at all")
-        return past
+        if mask is not None:
+            real = int(mask.sum().item())
+            total = int(mask.numel())
+            print(f"  REAL vs PAD in mask    : {real:6d} real of {total} positions "
+                  f"({100.0 * (total - real) / max(total, 1):.1f}% pad)")
+        return ret
 
     def generate_text_batch(input_ids, attention_mask=None, **kw):
         state["agent"] += 1

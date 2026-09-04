@@ -147,6 +147,15 @@ def main():
     parser.add_argument("--text_mas_context_length", type=int, default=-1, help="TextMAS context length limit")
     parser.add_argument("--think", action="store_true", help="Manually add think token in the prompt for LatentMAS")
     parser.add_argument("--latent_space_realign", action="store_true")
+    parser.add_argument("--pad_fix", action="store_true",
+                        help="Fix the right-padding artifact. Turns on THREE changes together, "
+                             "which is the only correct way to do it: (1) left padding, so the "
+                             "latent thought is seeded from the real last prompt token rather "
+                             "than a pad; (2) the real attention mask threaded through the "
+                             "latent loop, so pads already in the KV cache stay masked; "
+                             "(3) the corrected generation slice, which right padding made "
+                             "position-dependent. OFF by default: right padding is what the "
+                             "authors ran, so the unfixed path is the reproduction path.")
     # Ablations from the paper. methods/latent_mas.py has always read these via
     # getattr(args, ..., False), but run.py never defined them, so they were
     # unreachable -- permanently False on every run ever made with this repo.

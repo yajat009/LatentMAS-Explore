@@ -20,6 +20,19 @@ def _ensure_pad_token(tokenizer: AutoTokenizer) -> None:
             tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
 
+def _apply_pad_fix(tokenizer: AutoTokenizer, enabled: bool) -> None:
+    """Left-pad when the pad fix is on.
+
+    Decoder-only generation must left-pad: under right padding every sequence
+    shorter than the batch max continues from a pad token instead of its own last
+    real token, and transformers emits "right-padding was detected!" on every
+    batch. Off by default -- right padding is what the authors ran, so the unfixed
+    path stays the reproduction path.
+    """
+    if enabled:
+        tokenizer.padding_side = "left"
+
+
 def _past_length(past_key_values: Optional[Tuple]) -> int:
     if not past_key_values:
         return 0
@@ -34,6 +47,10 @@ class ModelWrapper:
         self.use_vllm = use_vllm and _HAS_VLLM
         self.vllm_engine = None
         self.latent_space_realign = bool(getattr(args, "latent_space_realign", False)) if args else False
+        # --pad_fix turns on all three parts of the right-padding fix together:
+        # left padding, the corrected generation slice, and real attention masks
+        # through the latent loop. Any one alone is wrong; see run.py's help.
+        self.pad_fix = bool(getattr(args, "pad_fix", False)) if args else False
         self._latent_realign_matrices: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self.args = args
 
@@ -65,11 +82,13 @@ class ModelWrapper:
             elif self.latent_space_realign:
                 raise ValueError("latent_space_realign requires --use_second_HF_model when using vLLM backend.")
             _ensure_pad_token(self.tokenizer)
+            _apply_pad_fix(self.tokenizer, self.pad_fix)
             return  # skip loading transformers model
 
         # fallback: normal transformers path
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
         _ensure_pad_token(self.tokenizer)
+        _apply_pad_fix(self.tokenizer, self.pad_fix)
         with torch.no_grad():
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
@@ -222,6 +241,7 @@ class ModelWrapper:
         temperature: float = 0.7,
         top_p: float = 0.95,
         past_key_values: Optional[Tuple] = None,
+        past_attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[List[str], Optional[Tuple]]:
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
@@ -238,11 +258,23 @@ class ModelWrapper:
                 device=self.device,
             )
             if past_len > 0:
-                past_mask = torch.ones(
-                    (attention_mask.shape[0], past_len),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
+                if (
+                    self.pad_fix
+                    and past_attention_mask is not None
+                    and past_attention_mask.shape[-1] == past_len
+                ):
+                    # The real mask carried out of the latent loop. torch.ones()
+                    # here re-admits every pad position sitting in the inherited
+                    # cache, which is the second half of the padding bug.
+                    past_mask = past_attention_mask.to(
+                        dtype=attention_mask.dtype, device=attention_mask.device
+                    )
+                else:
+                    past_mask = torch.ones(
+                        (attention_mask.shape[0], past_len),
+                        dtype=attention_mask.dtype,
+                        device=attention_mask.device,
+                    )
                 attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
         outputs = self.model.generate(
             input_ids=input_ids,
@@ -261,7 +293,14 @@ class ModelWrapper:
         generations: List[str] = []
         for idx, length in enumerate(prompt_lengths):
             length = int(length)
-            generated_ids = sequences[idx, length:]
+            # RIGHT padding puts the real tokens at [0, length), so generation
+            # starts at `length`. LEFT padding puts them at the END of the padded
+            # block, so generation starts after the full padded width. Applying
+            # the right-padding slice to a left-padded batch yields pad tokens
+            # plus a truncated answer -- silently, because skip_special_tokens
+            # hides the pads. This is why padding_side cannot be flipped alone.
+            start = input_ids.shape[1] if self.pad_fix else length
+            generated_ids = sequences[idx, start:]
             text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
             generations.append(text)
         return generations, outputs.past_key_values
@@ -281,7 +320,16 @@ class ModelWrapper:
         *,
         latent_steps: int,
         past_key_values: Optional[Tuple] = None,
+        past_attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple:
+        """Returns (past_key_values, running_attention_mask).
+
+        The mask is returned so the caller can hand the NEXT agent -- and finally
+        the judger -- a mask that still marks the pad positions in the inherited
+        cache as pad. Under --pad_fix that mask is real; without it the old
+        all-ones behaviour is preserved exactly, since right padding is the
+        reproduction path.
+        """
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
 
@@ -293,23 +341,51 @@ class ModelWrapper:
         if past_key_values is not None:
             past_len = _past_length(past_key_values)
             if past_len > 0:
-                past_mask = torch.ones(
-                    (attention_mask.shape[0], past_len),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
+                if (
+                    self.pad_fix
+                    and past_attention_mask is not None
+                    and past_attention_mask.shape[-1] == past_len
+                ):
+                    past_mask = past_attention_mask.to(
+                        dtype=attention_mask.dtype, device=attention_mask.device
+                    )
+                else:
+                    past_mask = torch.ones(
+                        (attention_mask.shape[0], past_len),
+                        dtype=attention_mask.dtype,
+                        device=attention_mask.device,
+                    )
                 attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
+
+        # Direct model(...) calls do not derive position_ids from the mask the way
+        # generate() does -- they fall back to sequential cache positions. That is
+        # fine under right padding (real tokens start at 0) but wrong under left
+        # padding, where every padded row would be shifted by its pad width. So
+        # compute them here whenever the fix is on.
+        position_ids = None
+        if self.pad_fix:
+            position_ids = (attention_mask.long().cumsum(dim=-1) - 1).clamp_min(0)
+            position_ids = position_ids[:, -input_ids.shape[1]:]
 
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=True,
             output_hidden_states=True,
             return_dict=True,
         )
         past = outputs.past_key_values
+        # `attention_mask` now covers exactly the positions held in `past`.
+        running_mask = attention_mask
 
+        # Position -1 is the LAST position of the row. Under left padding that is
+        # the real final prompt token, so the latent thought is seeded correctly.
+        # Under right padding it is a pad for every sequence shorter than the batch
+        # max -- measured at 93.3% of sequences -- which is the first half of the
+        # padding bug. Left padding is what makes this index right; that is why
+        # --pad_fix flips padding_side rather than gathering at sum(mask)-1 here.
         e_t = outputs.hidden_states[0][:, -1, :]          # [B, D]
         last_hidden = outputs.hidden_states[-1][:, -1, :] # [B, D]
         h_t = last_hidden.detach().clone()
@@ -331,23 +407,46 @@ class ModelWrapper:
             latent_embed = latent_vec.unsqueeze(1)
 
             past_len = _past_length(past)
-            latent_mask = torch.ones(
-                (latent_embed.shape[0], past_len + 1),
-                dtype=torch.long,
-                device=self.device,
-            )
+            if self.pad_fix:
+                # Extend the REAL mask by one position for the new latent entry.
+                # torch.ones(past_len + 1) below re-admits every pad already in
+                # the cache -- 35.8% of KV positions, measured.
+                latent_mask = torch.cat(
+                    [
+                        running_mask,
+                        torch.ones(
+                            (latent_embed.shape[0], 1),
+                            dtype=running_mask.dtype,
+                            device=running_mask.device,
+                        ),
+                    ],
+                    dim=-1,
+                )
+            else:
+                latent_mask = torch.ones(
+                    (latent_embed.shape[0], past_len + 1),
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            latent_pos = None
+            if self.pad_fix:
+                # One new position, numbered by how many real positions precede it.
+                latent_pos = (latent_mask.long().cumsum(dim=-1) - 1).clamp_min(0)[:, -1:]
+
             outputs = self.model(
                 inputs_embeds=latent_embed,
                 attention_mask=latent_mask,
+                position_ids=latent_pos,
                 past_key_values=past,
                 use_cache=True,
                 output_hidden_states=True,
                 return_dict=True,
             )
             past = outputs.past_key_values
+            running_mask = latent_mask
             last_hidden = outputs.hidden_states[-1][:, -1, :]
 
-        return past
+        return past, running_mask
     
     @torch.no_grad()
     def generate_latent_batch_hidden_state(
