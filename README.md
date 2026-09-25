@@ -191,21 +191,22 @@ makes the time comparison slightly unfair, which I fixed next.
 
 ### 3.2 — The same comparison with matched batch sizes
 
-I re-ran LatentMAS at bs=8 so both are on equal footing. On the 216 problems both
-finished:
+I re-ran LatentMAS at bs=8 so both are on equal footing. Both arms have now
+finished all 378 problems:
 
 | setup (both bs=8) | accuracy | seconds per problem | words generated |
 |---|---|---|---|
-| LatentMAS, ls=10 | 32.4% | **43.0** | 1,576 |
-| TextMAS | 71.3% | **99.7** | 2,192 |
+| LatentMAS, ls=10 | 28.0% | **44.6** | 1,538 |
+| TextMAS | 72.2% | **93.1** | 2,154 |
 
-Speedup: **2.32×** in time, **1.39×** in words. Fixing the batch mismatch made
-the speedup a bit *bigger*, not smaller — but it's still far from 3.7×.
+Speedup: **2.09×** in time, **1.40×** in words. Still far from the paper's 3.7×.
 
-(Interesting side note: LatentMAS was slightly *faster* at the smaller batch —
-43.0 vs 44.5 seconds — which is backwards from how batching usually works. I think
-this is the padding problem in Finding 5: at bs=15 the model wastes effort on
-filler.)
+(Earlier drafts of this table reported the 216-problem overlap available at the
+time — 32.4% accuracy, a 43.0s/problem LatentMAS time, and a 2.32× speedup — and
+noted that LatentMAS ran slightly *faster* at bs=8 than bs=15, which would have
+been backwards for how batching usually works. With both arms complete, that
+anomaly is gone: bs=8 (44.6s) and bs=15 (44.5s, Table 3.1) now land within
+noise of each other, as expected.)
 
 ### 3.3 — Does more silent thinking help? (45 problems, bs=1)
 

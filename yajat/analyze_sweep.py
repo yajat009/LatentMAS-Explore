@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare_arms import load, agents_of, elapsed_at  # noqa: E402
 
 PAT = re.compile(r"_ls(\d+)_bs(\d+)_think\d+(_realign)?$")
+MODEL_PAT = re.compile(r"_(Qwen3-[0-9]+B)_")
 
 
 def main():
@@ -50,8 +51,10 @@ def main():
         recs, marks = load(p)
         if len(recs) < args.min_n:
             continue
+        mm = MODEL_PAT.search(name)
         arms.append({
             "arm": name,
+            "model": mm.group(1) if mm else "?",
             "latent_steps": int(m.group(1)),
             "realign": bool(m.group(3)),
             "recs": recs,
@@ -60,6 +63,19 @@ def main():
 
     if not arms:
         raise SystemExit(f"no sweep checkpoints match {args.glob}")
+
+    # The default glob matches on ls/bs/think only, not model size. Two model
+    # sizes have wildly different accuracy at the same latent_steps (Finding
+    # "scale is the answer"), so silently mixing them into one "sweep" produces
+    # a nonsense shape verdict -- this bit the analysis once already.
+    models = sorted(set(a["model"] for a in arms))
+    if len(models) > 1:
+        raise SystemExit(
+            f"--glob matched checkpoints from {len(models)} different models "
+            f"({', '.join(models)}); a latent-steps sweep only makes sense within "
+            f"one model. Narrow --glob to one, e.g. "
+            f"'yajat/results/latent_mas_Qwen3-4B_mbppplus_sequential_ls*_bs1_think1*.ckpt.jsonl'."
+        )
 
     n = min(len(a["recs"]) for a in arms)
     print(f"{len(arms)} arms; common prefix = {n} problems")
