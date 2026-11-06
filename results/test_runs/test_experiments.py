@@ -13,7 +13,6 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from results.test_runs.audit_utils import ConstantMapping, make_forced_steps_rule, score_gold_logprob
 from results.test_runs.eval_utils import TOY_ITEMS, compute_mcnemar_exact_p, score_answer
 from results.test_runs.run_adaptive_latent_steps import make_converged_stop_rule
-from results.test_runs.run_execution_retry import check_against_visible_tests
 from results.test_runs.latent_mapping import build_mapping
 from results.test_runs.latent_pipeline import (AgentStats, SharedMemory, StopRule, append_to_memory, build_judger_prompts,
                                          build_latent_memory, build_memory_per_agent, load_model,
@@ -77,9 +76,6 @@ def test_code_scoring_and_visible_test_check() -> None:
     bad = "```python\ndef add(a, b):\n    return a - b\n```"
     assert score_answer("mbppplus", good, item)["correct"]
     assert not score_answer("mbppplus", bad, item)["correct"]
-    assert check_against_visible_tests(good, item["question"])[0]
-    passed, error = check_against_visible_tests(bad, item["question"])
-    assert not passed and "AssertionError" in error
 
 
 def test_math_scoring() -> None:

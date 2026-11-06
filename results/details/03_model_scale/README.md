@@ -39,6 +39,7 @@ Earlier notes listed these runs as still running, so this result was never writt
 Limits: all three runs used batch size 4, so the padding bug affects them (`04_padding_bug/`).
 In the single-agent run, only 51 of 198 outputs opened with `<think>`, and 50 of 198 never closed it. None of those 50 was correct.
 LatentMAS had 40 outputs that never closed. Part of the gain can therefore come from the bug's damage to the single agent.
+The paper's sequential numbers support this: Single 48.5, TextMAS 51.5, LatentMAS 52.0. Our LatentMAS score is near the paper's, but our single-agent score is 8.6 points below it.
 A batch-size-1 rerun would settle this.
 
 ## Evidence

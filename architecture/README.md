@@ -4,6 +4,7 @@ This folder holds the LatentMAS method code from
 [Gen-Verse/LatentMAS](https://github.com/Gen-Verse/LatentMAS) (commit `9a9e4d3`), and this document.
 The paper is [Latent Collaboration in Multi-Agent Systems](https://arxiv.org/abs/2511.20639).
 This document says what the method does, where each step is in the code, and how this copy differs from upstream.
+[GUIDE.md](GUIDE.md) explains every word, setting, benchmark and file in plain language.
 
 ## What the method does
 

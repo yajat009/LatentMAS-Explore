@@ -16,7 +16,7 @@ Start with the one-page summary in [results/](results/README.md).
 | The size of that drop depends on the `--think` flag, and the reason is unknown. | Steps 10 scored 25/45 with the flag and 35/45 without it. Steps 20 scored about the same both ways. | OPEN |
 | Qwen3-14B loses almost nothing from the latent steps on MBPP+. | 42/45 with the method off, 41/45 with it on | SUGGESTIVE |
 | The paper's 14B MBPP+ LatentMAS number used 0 latent steps, and the 4B number probably did too. In the released code, 0 steps discards the shared cache. The authors say 0 steps is part of the method. | All 1,134 entries of the authors' log show 0 steps, and their 4B command sets none | CONFIRMED / SUGGESTIVE |
-| LatentMAS beats the single agent on 14B GPQA. | 49.0% against 39.9% on 198 questions, p = 0.015, but the padding bug affects both runs | BUG-AFFECTED |
+| LatentMAS scored above the single agent on 14B GPQA, but the padding bug likely explains part of this. | 49.0% against 39.9% on 198 questions, p = 0.015. The paper's single-agent score is 48.5%. | BUG-AFFECTED |
 | Batched runs are broken by right padding. | 93.3% of batched LatentMAS sequences start from a pad token | CONFIRMED |
 | GSM8K results cannot separate the methods. | All methods score about 95% on the first questions | INCONCLUSIVE |
 | On GSM8K, latent messages show no question-specific content with the identity map. | 200 questions, one seed, 4B +0.40 [−0.8, 1.5], 8B −0.57 [−1.5, 0.4]. Not measured with `W_a` on. | PILOT |
@@ -25,7 +25,7 @@ Start with the one-page summary in [results/](results/README.md).
 
 | Folder | What it holds |
 |---|---|
-| [architecture/](architecture/README.md) | **Part 1.** How the method works, the original Gen-Verse code, the paper's figures, and a list of every change from upstream |
+| [architecture/](architecture/README.md) | **Part 1.** How the method works, the original Gen-Verse code, the paper's figures, and a list of every change from upstream. [GUIDE.md](architecture/GUIDE.md) explains every word, setting, benchmark and file. |
 | [results/](results/README.md) | **Part 2.** One page of results. `details/` has the evidence, and `test_runs/` has the scripts. |
 
 `data/` holds the upstream MedQA dataset. It stays at the root because `architecture/data.py` reads it by that path.

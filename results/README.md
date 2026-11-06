@@ -37,7 +37,7 @@ A larger model loses much less: Qwen3-14B scored 42 of 45 without the memory and
 | Did the paper's 14B MBPP+ number use 0 latent steps? | Yes. The authors' log shows this. | Sure |
 | Did the paper's 4B number use 0 latent steps? | Probably. The authors' own command does. | Fairly sure |
 | Was that an error by the authors? | Unknown. They say 0 steps is part of their method. | Not proven |
-| Does the shared memory ever help? | Maybe. 14B on GPQA scored 49% against 40%, but the padding bug affects that test. | Not sure |
+| Does the shared memory ever help? | Unknown. 14B on GPQA scored 49% against 40%, but the padding bug likely lowered the 40%: the paper gives 48.5% for it. | Not sure |
 
 ## What is in this folder
 
