@@ -25,7 +25,7 @@ Numbers were recomputed on 2026-11-06 from the raw checkpoints on HPC3.
 | [03_model_scale](03_model_scale/) | Does LatentMAS beat the single agent anywhere? | 14B GPQA: 49.0% against 39.9%, p = 0.015, with padding in both runs. | BUG-AFFECTED | 198 |
 | [04_padding_bug](04_padding_bug/) | Does batching break the runs? | Yes. Its cost in accuracy is not measured well. | CONFIRMED / SUGGESTIVE | 45 to 378 |
 | [05_realign_matrix](05_realign_matrix/) | Does `W_a` do anything? | Not on 4B (it is the identity). On 8B and 14B it is a large change, and our 14B runs did not use it. | CONFIRMED | weights |
-| [06_released_logs](06_released_logs/) | Did the paper's MBPP+ cells use the method? | The 14B cell did not. The 4B cell probably did not. | CONFIRMED / SUGGESTIVE | 378 |
+| [06_released_logs](06_released_logs/) | Did the paper's MBPP+ cells use latent steps? | The 14B cell used 0. The 4B cell probably did too. Whether this was an error is not proven. | CONFIRMED / SUGGESTIVE | 378 |
 | [07_gsm8k](07_gsm8k/) | Do the methods differ on GSM8K? | The first questions cannot separate them. | INCONCLUSIVE | 40 to 100 |
 | [08_content_audit](08_content_audit/) | Do latent messages carry question-specific content? | No sign of it with the identity map. Not measured with `W_a` on. | PILOT | 200 |
 

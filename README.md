@@ -15,7 +15,7 @@ Every number has a label and evidence in [results/](results/README.md).
 | On Qwen3-4B MBPP+, the paper's 73.5% does not reproduce with the method on and `--think`. | First 84 questions, batch size 1: 47.6%, against 75.0% with the method off (3 wins, 26 losses, p = 0.00002) | CONFIRMED |
 | The size of that drop depends on the `--think` flag, and the reason is unknown. | Steps 10 scored 25/45 with the flag and 35/45 without it. Steps 20 scored about the same both ways. | OPEN |
 | Qwen3-14B loses almost nothing from the latent steps on MBPP+. | 42/45 with the method off, 41/45 with it on | SUGGESTIVE |
-| The paper's 14B MBPP+ LatentMAS number used 0 latent steps, so the method was off. The 4B number probably did too. | All 1,134 entries of the authors' log show 0 steps | CONFIRMED / SUGGESTIVE |
+| The paper's 14B MBPP+ LatentMAS number used 0 latent steps, and the 4B number probably did too. In the released code, 0 steps discards the shared cache. The authors say 0 steps is part of the method. | All 1,134 entries of the authors' log show 0 steps, and their 4B command sets none | CONFIRMED / SUGGESTIVE |
 | LatentMAS beats the single agent on 14B GPQA. | 49.0% against 39.9% on 198 questions, p = 0.015, but the padding bug affects both runs | BUG-AFFECTED |
 | Batched runs are broken by right padding. | 93.3% of batched LatentMAS sequences start from a pad token | CONFIRMED |
 | GSM8K results cannot separate the methods. | All methods score about 95% on the first questions | INCONCLUSIVE |
