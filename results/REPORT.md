@@ -1,6 +1,52 @@
 # LatentMAS on HPC3: inventory, reduced reproduction, audit pilot, cleanup
 
-<!-- SUMMARY -->
+## Summary
+
+**GPU time:** about 4.3 GPU-hours of actual work, slightly over your 4-hour target: batch job 2.67 h, audit pilot 1.28 h, smoke test at most 0.37 h. Your interactive session also held an A30 for its full 4 hours, including idle time. All of this was on the class account.
+
+**What already existed:** 3 of the existing configurations are trustworthy: 4B MBPP+ baseline (69.0), 4B MBPP+ TextMAS (72.2), and 14B GPQA baseline (39.9). No LatentMAS result is, because none has the method on, batch size 1 and the full test set.
+
+**Reproduction (partial, on subsets):**
+
+| Model, task | n | Baseline | TextMAS | LatentMAS (m20) | Paper (B / T / L, full set) |
+|---|---|---|---|---|---|
+| 4B MBPP+ | 84 | 70.2 | 71.4 | **47.6** | 63.5 / 69.8 / 73.5 |
+| 4B GSM8K | 40 | 95.0 | 95.0 | 95.0 | 82.4 / 89.8 / 88.2 |
+| 8B MBPP+ | 14 | 78.6 | not run | 92.9 | 64.8 / 69.5 / 74.6 |
+
+4B MBPP+ LatentMAS does not reproduce with these settings: 23 losses and 4 wins against the baseline, p = 0.0003. 4B GSM8K cannot separate the methods at this size. 8B has too few questions for a verdict.
+
+**Audit pilot (GSM8K, 200 questions, log p(gold)):**
+- Question-specific content: 4B +0.397 [-0.757, 1.495], 8B -0.572 [-1.480, 0.393]. Both intervals include zero.
+- Any real message: 4B +1.874 [0.736, 3.030], 8B +3.010 [2.050, 3.943].
+- Agent prompts: 4B -12.279, 8B -9.115. Both intervals exclude zero.
+- Mean cos(ridge, identity): 4B 1.0000, 8B 0.0274. Your prediction holds.
+- Patching: every swap interval includes zero. Every pause interval excludes zero.
+- Logit lens: gold's median rank reaches about 5-10 by step 8 on 4B. It stays in the thousands on 8B.
+
+**Cleanup:** branch `cleanup-ste`, 6 commits, not merged or pushed. Tests pass and the toy numbers are identical before and after. Upstream code is unchanged apart from comments, docstrings and unused imports. Details in Phase 5.
+
+**Problems hit:**
+
+| Problem | Log | Fix or status |
+|---|---|---|
+| `hpc3_bundle.zip` missing at first | - | You uploaded it |
+| `repro-fixes.patch` does not apply to the `architecture/` layout | - | Applied the missing parts by hand, `87c80de` |
+| `inventory_results.py` mislabeled old logs as steps 0, bs 20 | `results/inventory.csv` (wrong), `results/inventory_corrected.csv` (use this) | Fixed. `inventory_corrected.csv` predates the sample-count fix, so resumed `.log` rows can show too small an n. Checkpoint rows are right. |
+| Inventory script skipped everything when given an absolute path, because `/data` is on the skip list | - | Fixed |
+| `reproduce.sh` had no checkpoints and overwrote logs on rerun | - | Fixed |
+| Your plan's 12 jobs would take about 70 GPU-hours | - | Replaced by the 4-hour plan you asked for |
+| 8B `exp5` out of memory at batch 8 on A30 | `results/audit_pilot/exp5_content_audit_Qwen3-8B.log` | One retry at batch 2 succeeded |
+| Runs overran their `timeout` limits by 6-10 minutes, so 8B got little time and realign never ran | `logs/latentmas-4h.58983470.out` | Open. Cause not checked. Exit codes in that log are also wrong: `$(date)` resets `$?`. |
+| A30s ran MBPP+ at about 60 s per question, twice my estimate | same | Smaller samples than planned |
+| Earlier notes said the `gpu` partition rejects this account | - | Outdated for the class account. Notes corrected. |
+
+**Jobs still running:** none from this work. 58983470 ended at its time limit. Only your interactive session 58981325 remains, and it ends at 05:27.
+
+**What to run next, in order:**
+1. Decide about `--think`. A 4B MBPP+ run with steps 20 and no `--think` would test the largest open question, about 40-60 minutes for 84 questions.
+2. Finish 8B MBPP+: the three runs resume from their checkpoints with `sbatch hpc3/run_4h_plan.sh`. Raise the `-t` limit and the per-run limits first, because finished work is kept but the limits are short. Note the script would also resume the 4B runs, so comment those out if you only want 8B.
+3. Review and merge `cleanup-ste`: `git checkout cleanup-ste`, then `git merge main` to bring in this report and `compare_subset.py`. Nothing has been pushed.
 
 ## Setup before Phase 1
 
@@ -70,6 +116,41 @@ The two rows from `example_logs/` are the authors' released runs: 14B MBPP+ (ste
 | `python -m experiments.test_experiments` | All 8 checks passed |
 | Smoke test, 4 GSM8K questions, 512 tokens, 4B | baseline, TextMAS, LatentMAS m20, LatentMAS m20 realign all finished, 3/4 correct each. Logs in `results/smoke/`. |
 | `HF_HOME` | The models were already in `/pub/ynagaraj/hf`, so I made `/pub/ynagaraj/hf_cache` a symlink to it. Nothing was downloaded twice. |
+
+## Phase 3: reduced reproduction
+
+Batch job 58983470, one A30, 02:30 to 05:10, ended by its 2 h 40 min time limit (`logs/latentmas-4h.58983470.out`). Script: `hpc3/run_4h_plan.sh`. Logs and checkpoints: `results/repro_4h/`. Comparison: `hpc3/compare_subset.py`, saved output `results/repro_4h/compare_subset.txt`.
+
+All rows: sequential layout. LatentMAS ran with `--think`, batch size 1, max 4096 new tokens. No run reached its target size, so none has a final JSON summary. The numbers come from the checkpoints.
+
+**Each table row uses the first n questions, and the paper number is for the full test set, so "gap" is only a rough check.** Early questions are easier than the full set (GSM8K baseline here is 95.0 against 82.4), so positive gaps do not count as matches. Method-against-method on the same questions is the fair comparison.
+
+| Model | Task | Layout | Method | Latent steps | Realign | n | Ours % | Paper % | Gap | Gap in SE |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Qwen3-4B | MBPP+ | sequential | baseline (old run, cut to n) | - | - | 84 | 70.2 | 63.5 | +6.7 | +1.4 |
+| Qwen3-4B | MBPP+ | sequential | TextMAS (old run, cut to n) | - | - | 84 | 71.4 | 69.8 | +1.6 | +0.3 |
+| Qwen3-4B | MBPP+ | sequential | LatentMAS | 20 | off | 84 | 47.6 | 73.5 | -25.9 | -4.7 |
+| Qwen3-4B | GSM8K | sequential | baseline | - | - | 40 | 95.0 | 82.4 | +12.6 | +3.7 |
+| Qwen3-4B | GSM8K | sequential | TextMAS | - | - | 40 | 95.0 | 89.8 | +5.2 | +1.5 |
+| Qwen3-4B | GSM8K | sequential | LatentMAS | 20 | off | 40 | 95.0 | 88.2 | +6.8 | +2.0 |
+| Qwen3-8B | MBPP+ | sequential | baseline | - | - | 14 | 78.6 | 64.8 | +13.8 | +1.3 |
+| Qwen3-8B | MBPP+ | sequential | LatentMAS | 20 | off | 14 | 92.9 | 74.6 | +18.3 | +2.7 |
+
+Full-set references for 4B MBPP+ from Phase 1: baseline 69.0 (n=378), TextMAS 72.2 (n=378). Runs with more questions than the shared n: 4B GSM8K baseline 54/56, LatentMAS 81/87 (54/56 on the baseline's 56). 8B MBPP+ baseline 13/16.
+
+**Paired results.** 4B MBPP+, LatentMAS against baseline: 4 wins, 23 losses, exact McNemar p = 0.0003. 4B GSM8K: all three methods got the same questions right on the first 40. 8B MBPP+: LatentMAS 2 wins, 0 losses on 14.
+
+**Causes checked for the 4B MBPP+ miss (over 3 SE):**
+- Latent steps: 20, so the method was on. Batch size: 1. transformers: 4.57.1.
+- Truncated thinking: 11.9% of LatentMAS Judger outputs have no `</think>`, against 13.1% for the baseline, so this does not explain the gap.
+- Not ruled out: `--think`. The Phase 1 sweep at 45 questions scored higher without it (see "Worth a look"). I did not test this here.
+- The first 45 questions came from your earlier run with the same settings (24/45). The 39 new ones scored 16/39, so the two parts agree.
+
+**Verdict, Qwen3-4B (partial).** MBPP+ LatentMAS does not reproduce with these settings. It scored 47.6 on the first 84 questions, 22.6 points below baseline on the same questions, while the paper reports LatentMAS 10 points above baseline. Baseline and TextMAS are close to the paper's numbers on this task (Phase 1). On GSM8K the first 40 questions are too easy to separate the methods: all three score 95.0. That result neither confirms nor contradicts the paper.
+
+**Verdict, Qwen3-8B (no verdict).** n=14 is too small. LatentMAS scored 13/14 and baseline 11/14 on the same questions, which is not evidence either way. The realign run did not start.
+
+**Not run:** the rest of every test set, 8B realign, 8B GSM8K, 8B TextMAS, latent steps 40, the hierarchical layout, and HumanEval+, MedQA and ARC.
 
 ## Phase 4: content audit pilot
 
@@ -176,4 +257,5 @@ Limits of these checks: the tiny model scores 0 accuracy, so accuracy arithmetic
 - GSM8K scoring is strict: `\boxed{1,000}` becomes `1`, and `18.00` does not equal `18`.
 - `_truncate_past` leaves RoPE keys in place while new tokens reuse earlier positions (`--sequential_info_only`, `--latent_only`).
 - `--use_vllm --pad_fix` is not fixed, and `run_batch_vllm` has further problems. Your rules already forbid `--use_vllm`.
+
 
