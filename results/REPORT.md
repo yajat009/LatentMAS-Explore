@@ -1,6 +1,45 @@
 # LatentMAS on HPC3: inventory, reduced reproduction, audit pilot, cleanup
 
-## Summary
+## Audit, 2026-11-06 morning (read this first)
+
+You challenged the three-way GSM8K tie and asked for a code audit. This section corrects the summary below. The test numbers are interim: jobs 59001443-59001448 were still running when this was written. Their limit is 1 h 30 min, and they save to `results/audit_tests/`.
+
+**Corrections to what I reported earlier**
+
+1. **"Baseline and TextMAS results are trustworthy" was wrong.** They ran at batch size above 1, which has a real bug (finding 1). The word "trustworthy" below does not apply to them until bs=1 runs replace them.
+2. **"Early questions are easier" for GSM8K was an untested guess.** It holds for MBPP+ (77.8 on the first 45, 69.0 on all 378). I have no full GSM8K run, so I do not know why our baseline is far above the paper's 82.4.
+3. **"Test `--think` first" was the wrong priority.** The new run shows `--think` does not explain the MBPP+ drop (finding 3).
+4. **"Too easy to separate the methods" skipped the check you asked for.** The tie is now explained (finding 4).
+
+**Finding 1: right padding breaks batched baseline and TextMAS runs. Confirmed bug, small effect on scores so far.**
+The tokenizer pads on the right, and `generate()` starts each row from its last column. For a shorter row that column is a pad token. On the first 8 GSM8K prompts, the model alone gives p(`<think>`) = 1.000. Padded rows gave as low as 0.000, and the measured first token matched the actual output on every row. Across the saved runs, unpadded rows open normally 7/7 (GSM8K) and 26/26 (MBPP+). Padded rows do so 1/49 and 9/352. In the bs=1 rerun, 50/50 open with `<think>`. The prompt's statement that batching these methods is safe is not correct. `--pad_fix` exists but was not used.
+
+Effect on accuracy so far is small: GSM8K baseline 49/50 at bs=1 against 48/50 at bs=8, MBPP+ baseline 22/27 at both. So this bug does not explain the reproduction failure.
+
+**Finding 2: the GSM8K scorer compares strings.** `57.00` against gold `57` is marked wrong. Numeric rescoring moves LatentMAS from 81/87 to 83/87, and changes neither baseline nor TextMAS. This is upstream behaviour (`methods/*`, `normalize_answer`), not yet fixed because a fix changes results.
+
+**Finding 3: the latent steps cause the 4B MBPP+ drop.** Same first 27 questions:
+
+| Run | Correct | Against baseline bs=1 |
+|---|---|---|
+| Baseline, bs=1 | 22/27 (81.5) | reference |
+| Baseline, bs=15, old | 22/27 (81.5) | 2 wins, 2 losses |
+| TextMAS, bs=8, old | 21/27 (77.8) | 1 win, 2 losses |
+| LatentMAS steps 0, `--think` | 23/27 (85.2) | 2 wins, 1 loss |
+| LatentMAS steps 20, `--think` | 14/27 (51.9) | 1 win, 9 losses |
+| LatentMAS steps 20, no `--think` | 13/27 (48.1) | 0 wins, 9 losses |
+
+Steps 0 gives the Judger no cache. Steps 0 has also reached 52/68 (76.5). With or without `--think`, steps 20 falls to about half. n=27 is small, but the 9-to-1 split agrees with the 23-to-4 split on 84 questions. This fits your earlier finding that the released 14B MBPP+ log used steps 0: the paper's 4B LatentMAS number (73.5) is close to what steps 0 scores here. That is consistent with the paper's cell being a steps-0 run. It is not proof.
+
+**Finding 4: the tie is not a bug.** The runs are independent: different prompts, agents and outputs. All three miss the same 2 of the first 40 questions with the same answers. Q12 expects "year 13" where 90 / 7.5 = 12. Q37 says he sells "all his toys" but expects 2 sets left. Past question 40, LatentMAS does differ: 2 real misses plus the 2 scorer errors.
+
+**Checked and found correct** (real 4B model, greedy): generating from a cache matches one concatenated pass; feeding an embedding matches feeding the same token ID (difference 0.0); `hidden_states[-1]` is post-norm; repo changes from upstream `9a9e4d3` other than the checkpoint code, ablation flags and vLLM guard are behind `--pad_fix`, which was off; `utils.py` and `prompts.py` are identical to upstream.
+
+**Not explained yet:** why latent steps hurt MBPP+ but not GSM8K (LatentMAS 83/87 after rescoring), and why our GSM8K baseline is so far above the paper's. Job 59001448 (`experiments.exp0_controls`, an independent implementation) tests whether the MBPP+ drop is specific to upstream's code. It writes results only at the end, so it may produce nothing if the limit ends it first.
+
+**What these runs do not settle:** all are small prefixes, one seed. No full test set was run.
+
+## Summary (written before the audit; see corrections above)
 
 **GPU time:** about 4.3 GPU-hours of actual work, slightly over your 4-hour target: batch job 2.67 h, audit pilot 1.28 h, smoke test at most 0.37 h. Your interactive session also held an A30 for its full 4 hours, including idle time. All of this was on the class account.
 
