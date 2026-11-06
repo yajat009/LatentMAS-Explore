@@ -1,15 +1,16 @@
-"""Direction 3: give the Judger less to read.
+"""Compare trimmed versions of the shared memory, to test how much of it the Judger needs.
 
-The Judger normally attends to all three agents' prompts (three copies of the
-question) plus every latent step. This compares trimmed versions of that memory:
+The Judger normally attends to the prompts of all three agents (three copies of the question)
+and to every latent step. The conditions are:
 
-    full              everything (repo default)
-    last_agent_only   only the Refiner's prompt + latent steps (repo's sequential_info_only)
-    last_latent_only  only the Refiner's latent steps (repo's latent_only)
-    all_latents_only  the latent steps of all three agents, no prompts
+    full              everything (the repo's default)
+    last_agent_only   only the Refiner's prompt and latent steps (the repo's sequential_info_only)
+    last_latent_only  only the Refiner's latent steps (the repo's latent_only)
+    all_latents_only  the latent steps of all three agents, without prompts
 
-Trimming keeps each cached key's original RoPE position, and the Judger's tokens
-continue from the untrimmed length, so no position is reused (see SharedMemory.keep_only).
+Trimming keeps the original RoPE (rotary position embedding) position of each cached key.
+The Judger's tokens continue from the untrimmed length, so no position is reused.
+See SharedMemory.keep_only.
 
 Usage:
     python -m experiments.exp3_trimmed_memory --model_name Qwen/Qwen3-4B --task mbppplus --max_samples 150 --think
@@ -19,9 +20,10 @@ import argparse
 
 import torch
 
-from experiments.eval_utils import add_common_arguments, load_items, print_paired_report, save_jsonl, score_answer
+from experiments.eval_utils import (add_common_arguments, collect_correct_by_condition, iterate_batches, load_items,
+                                    print_paired_report, save_jsonl, score_answer)
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import build_latent_memory, generate_text, build_judger_prompts, load_model
+from experiments.latent_pipeline import build_judger_prompts, build_latent_memory, generate_with_args, load_model
 
 # condition name -> which memory segments the Judger keeps
 KEEP_RULES = {
@@ -33,6 +35,7 @@ KEEP_RULES = {
 
 
 def main() -> None:
+    """Run every keep rule on each batch, then print the memory sizes and the paired report, and save the rows."""
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_arguments(parser)
     args = parser.parse_args()
@@ -43,9 +46,7 @@ def main() -> None:
     items = load_items(args.task, args.max_samples, args.toy)
 
     rows = []
-    for batch_start in range(0, len(items), args.batch_size):
-        batch = items[batch_start:batch_start + args.batch_size]
-        questions = [item["question"] for item in batch]
+    for batch_start, batch, questions in iterate_batches(items, args.batch_size):
         prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
         full_memory, _ = build_latent_memory(model, tokenizer, questions, model_name=args.model_name,
                                              task=args.task, latent_steps=args.latent_steps,
@@ -53,8 +54,7 @@ def main() -> None:
 
         for name, keep_rule in KEEP_RULES.items():
             memory = full_memory.keep_only(keep_rule)
-            answers = generate_text(model, tokenizer, prompts, memory, max_new_tokens=args.max_new_tokens,
-                                    temperature=args.temperature, top_p=args.top_p)
+            answers = generate_with_args(model, tokenizer, prompts, memory, args)
             for offset, (item, answer) in enumerate(zip(batch, answers)):
                 memory_tokens = int(memory.attention_mask[offset].sum())
                 rows.append({"index": batch_start + offset, "condition": name, "answer": answer,
@@ -63,11 +63,10 @@ def main() -> None:
 
     print("\nMean memory size the Judger reads (tokens):")
     for name in KEEP_RULES:
-        sizes = [r["memory_tokens"] for r in rows if r["condition"] == name]
+        sizes = [row["memory_tokens"] for row in rows if row["condition"] == name]
         print(f"  {name:<18} {sum(sizes) / len(sizes):.0f}")
 
-    correct_by_condition = {name: [r["correct"] for r in rows if r["condition"] == name] for name in KEEP_RULES}
-    print_paired_report(correct_by_condition, baseline="full")
+    print_paired_report(collect_correct_by_condition(rows, KEEP_RULES), baseline="full")
     save_jsonl(rows, f"{args.output_dir}/exp3_{args.task}_m{args.latent_steps}.jsonl")
 
 

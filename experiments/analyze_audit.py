@@ -1,9 +1,11 @@
-"""Combine exp5 content-audit runs across seeds into one table with error bars and paired tests.
+"""Combine exp5 content-audit runs across seeds, to report one table with error bars and paired tests.
 
-For each condition: mean accuracy over seeds and the spread (min to max across seeds).
-For each part of the decomposition: the accuracy difference averaged over seeds, a 95% paired
-bootstrap interval over questions (each question's correctness averaged over seeds first), and a
-Holm-corrected p-value from a paired sign-flip permutation test.
+For each condition, the script prints the mean accuracy over seeds and the range across seeds.
+For each part of the decomposition, the script prints:
+
+  * the accuracy difference averaged over seeds,
+  * a 95% paired bootstrap interval over questions (it first averages each question over seeds),
+  * a Holm-corrected p-value from a paired sign-flip permutation test.
 
 Usage:
     python -m experiments.analyze_audit experiments/results/exp5_Qwen3-4B_gsm8k_m20_seed*.jsonl
@@ -12,6 +14,7 @@ Usage:
 import argparse
 import json
 from collections import defaultdict
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -19,83 +22,95 @@ from experiments.audit_utils import compute_bootstrap_ci
 from experiments.exp5_content_audit import DECOMPOSITION
 
 
-def load(paths):
-    # correct[condition][seed][index] = 0/1 ; logp[condition][index] = list over seeds
+def load_audit_rows(paths: List[str]) -> Tuple[Dict, Dict]:
+    """Read exp5 JSONL files and return (correct, logp).
+
+    correct[condition][seed][index] is 0.0 or 1.0.
+    logp[condition][index] is a list with one value per seed.
+    """
     correct = defaultdict(lambda: defaultdict(dict))
     logp = defaultdict(lambda: defaultdict(list))
     for path in paths:
-        with open(path) as f:
-            for line in f:
-                r = json.loads(line)
-                if r.get("correct") is not None:
-                    correct[r["condition"]][r["seed"]][r["index"]] = float(bool(r["correct"]))
-                if r.get("gold_logprob") is not None:
-                    logp[r["condition"]][r["index"]].append(r["gold_logprob"])
+        with open(path) as jsonl_file:
+            for line in jsonl_file:
+                row = json.loads(line)
+                if row.get("correct") is not None:
+                    correct[row["condition"]][row["seed"]][row["index"]] = float(bool(row["correct"]))
+                if row.get("gold_logprob") is not None:
+                    logp[row["condition"]][row["index"]].append(row["gold_logprob"])
     return correct, logp
 
 
-def per_question_mean(correct_by_seed):
-    indices = sorted(set.intersection(*(set(d) for d in correct_by_seed.values())))
-    return indices, torch.tensor([[correct_by_seed[s][i] for s in sorted(correct_by_seed)] for i in indices]).mean(1)
+def average_correct_per_question(correct_by_seed: Dict[int, Dict[int, float]]) -> Tuple[List[int], torch.Tensor]:
+    """Return the question indices that all seeds share, and each question's mean correctness over seeds."""
+    indices = sorted(set.intersection(*(set(by_index) for by_index in correct_by_seed.values())))
+    correct_table = torch.tensor([[correct_by_seed[seed][index] for seed in sorted(correct_by_seed)]
+                                  for index in indices])  # [questions, seeds]
+    return indices, correct_table.mean(1)
 
 
-def permutation_p(diffs: torch.Tensor, n_perm: int = 20000, seed: int = 0) -> float:
+def compute_permutation_p(diffs: torch.Tensor, n_perm: int = 20000, seed: int = 0) -> float:
+    """Return the two-sided p-value of a paired sign-flip permutation test on the mean of `diffs`."""
     generator = torch.Generator().manual_seed(seed)
-    signs = torch.randint(0, 2, (n_perm, len(diffs)), generator=generator).double() * 2 - 1
+    signs = torch.randint(0, 2, (n_perm, len(diffs)), generator=generator).double() * 2 - 1  # [n_perm, questions]
     null = (signs * diffs).mean(1).abs()
     return ((null >= diffs.mean().abs() - 1e-12).sum().item() + 1) / (n_perm + 1)
 
 
-def holm(pvalues):
-    order = sorted(range(len(pvalues)), key=lambda i: pvalues[i])
-    adjusted, running = [0.0] * len(pvalues), 0.0
+def adjust_p_values_holm(p_values: List[float]) -> List[float]:
+    """Return Holm-adjusted p-values, which control the error rate over several tests, in the input order."""
+    order = sorted(range(len(p_values)), key=lambda i: p_values[i])
+    adjusted, running = [0.0] * len(p_values), 0.0
     for rank, i in enumerate(order):
-        running = max(running, min(1.0, (len(pvalues) - rank) * pvalues[i]))
+        running = max(running, min(1.0, (len(p_values) - rank) * p_values[i]))
         adjusted[i] = running
     return adjusted
 
 
 def main() -> None:
+    """Print the per-condition table, then the accuracy and log p(gold) decompositions."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+")
     args = parser.parse_args()
-    correct, logp = load(args.paths)
+    correct, logp = load_audit_rows(args.paths)
 
     print(f"{'condition':<18}{'seeds':>6}{'n':>6}{'mean acc':>10}{'seed range':>18}")
     for condition, by_seed in correct.items():
-        accs = [sum(d.values()) / len(d) for d in by_seed.values()]
-        n = len(next(iter(by_seed.values())))
-        print(f"{condition:<18}{len(accs):>6}{n:>6}{sum(accs) / len(accs):>10.3f}"
-              f"{f'{min(accs):.3f}-{max(accs):.3f}':>18}")
+        accuracies = [sum(by_index.values()) / len(by_index) for by_index in by_seed.values()]
+        n_questions = len(next(iter(by_seed.values())))
+        print(f"{condition:<18}{len(accuracies):>6}{n_questions:>6}{sum(accuracies) / len(accuracies):>10.3f}"
+              f"{f'{min(accuracies):.3f}-{max(accuracies):.3f}':>18}")
 
     results = []
-    for name, x, y in DECOMPOSITION:
-        if x not in correct or y not in correct:
+    for name, condition_x, condition_y in DECOMPOSITION:
+        if condition_x not in correct or condition_y not in correct:
             continue
-        ix, mx = per_question_mean(correct[x])
-        iy, my = per_question_mean(correct[y])
-        common = sorted(set(ix) & set(iy))
-        dx = torch.tensor([mx[ix.index(i)].item() for i in common], dtype=torch.float64)
-        dy = torch.tensor([my[iy.index(i)].item() for i in common], dtype=torch.float64)
-        diffs = dx - dy
-        results.append((name, diffs.mean().item(), compute_bootstrap_ci(diffs), permutation_p(diffs), len(common)))
+        indices_x, means_x = average_correct_per_question(correct[condition_x])
+        indices_y, means_y = average_correct_per_question(correct[condition_y])
+        common = sorted(set(indices_x) & set(indices_y))
+        paired_x = torch.tensor([means_x[indices_x.index(i)].item() for i in common], dtype=torch.float64)
+        paired_y = torch.tensor([means_y[indices_y.index(i)].item() for i in common], dtype=torch.float64)
+        diffs = paired_x - paired_y
+        results.append((name, diffs.mean().item(), compute_bootstrap_ci(diffs), compute_permutation_p(diffs),
+                        len(common)))
 
     if results:
-        adjusted = holm([r[3] for r in results])
+        adjusted = adjust_p_values_holm([result[3] for result in results])
         print(f"\n{'part (X minus Y)':<28}{'acc diff':>10}{'95% CI':>20}{'p (Holm)':>10}{'n':>6}")
-        for (name, mean, (lo, hi), _, n), p in zip(results, adjusted):
-            print(f"{name:<28}{mean:>10.3f}{f'[{lo:.3f}, {hi:.3f}]':>20}{p:>10.4f}{n:>6}")
+        for (name, mean, (lower, upper), _, n_common), p_value in zip(results, adjusted):
+            print(f"{name:<28}{mean:>10.3f}{f'[{lower:.3f}, {upper:.3f}]':>20}{p_value:>10.4f}{n_common:>6}")
 
     if logp:
         print(f"\n{'part (X minus Y)':<28}{'log p(gold) diff':>18}{'95% CI':>22}")
-        for name, x, y in DECOMPOSITION:
-            if x not in logp or y not in logp:
+        for name, condition_x, condition_y in DECOMPOSITION:
+            if condition_x not in logp or condition_y not in logp:
                 continue
-            common = sorted(set(logp[x]) & set(logp[y]))
-            diffs = torch.tensor([sum(logp[x][i]) / len(logp[x][i]) - sum(logp[y][i]) / len(logp[y][i])
+            logp_x, logp_y = logp[condition_x], logp[condition_y]
+            common = sorted(set(logp_x) & set(logp_y))
+            diffs = torch.tensor([sum(logp_x[i]) / len(logp_x[i]) - sum(logp_y[i]) / len(logp_y[i])
                                   for i in common], dtype=torch.float64)
-            lo, hi = compute_bootstrap_ci(diffs)
-            print(f"{name:<28}{diffs.mean().item():>18.3f}{f'[{lo:.3f}, {hi:.3f}]':>22}")
+            lower, upper = compute_bootstrap_ci(diffs)
+            print(f"{name:<28}{diffs.mean().item():>18.3f}{f'[{lower:.3f}, {upper:.3f}]':>22}")
 
 
 if __name__ == "__main__":

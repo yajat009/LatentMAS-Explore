@@ -1,26 +1,27 @@
-"""Content audit: does the latent channel carry question-specific information?
+"""Audit the content of the latent channel, to test whether it carries question-specific information.
 
 Every condition uses the same Judger prompt on the same questions. Only the shared memory differs:
 
     A judger_alone     no memory
     B prompts_only     the three agent prompts in the cache, no latent steps (m = 0, cache kept)
-    C pause            agent prompts + the same number of latent positions, all filled with one
+    C pause            agent prompts and the same number of latent positions, all filled with one
                        content-free vector (pause tokens)
     D swapped          the whole agent memory built for a DIFFERENT question (same step counts)
-    E latent_identity  real LatentMAS memory, repo default mapping (W_a = I)
-      latent_ridge     real memory, the paper's W_a
-      latent_random    real memory, h rotated by a fixed random orthogonal matrix
+    E latent_identity  real LatentMAS memory, with the repo's default mapping (W_a = I)
+      latent_ridge     real memory, with the paper's W_a
+      latent_random    real memory, with h rotated by a fixed random orthogonal matrix
 
-The total gain E - A splits into  (B-A) prompts + (C-B) positions/compute + (D-C) any message
+The total gain E - A splits into (B-A) prompts + (C-B) positions and compute + (D-C) any message
 + (E-D) question-specific content. Only E-D is communication.
 
-With --adaptive, latent_identity stops each row per agent when its hidden state converges, and
-every other latent condition is forced to use exactly the same per-row, per-agent step counts,
-so all controls are compute-matched question by question.
+With --adaptive, latent_identity stops each row per agent when its hidden state converges. Every
+other latent condition then uses the same per-row, per-agent step counts, so all controls match
+in compute question by question.
 
-Two scores per question:
+The script gives two scores per question:
+
     correct        the generated answer is right (skipped with --no_generate)
-    gold_logprob   teacher-forced log p(gold answer) after "...\\boxed{" (math/multiple-choice tasks)
+    gold_logprob   teacher-forced log p(gold answer) after "...\\boxed{" (math and multiple-choice tasks)
 
 Usage:
     python -m experiments.exp5_content_audit --model_name Qwen/Qwen3-4B --task gsm8k --max_samples -1 \
@@ -29,22 +30,25 @@ Combine seeds afterwards with experiments.analyze_audit.
 """
 
 import argparse
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+from torch.nn.functional import cosine_similarity
 
-from experiments.latent_pipeline import build_memory_per_agent
 from experiments.audit_utils import (ConstantMapping, RandomRotationMapping, RecordingMapping,
-                                     make_forced_steps_rule, score_gold_logprob,
-                                     compute_paired_mean_difference)
-from experiments.eval_utils import (CODE_TASKS, add_common_arguments, load_items, compute_mcnemar_exact_p, save_jsonl,
-                                    score_answer)
-from experiments.exp2_adaptive_steps import stop_when_converged
-from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import LATENT_AGENTS, generate_text, build_judger_prompts, load_model
+                                     compute_paired_mean_difference, make_forced_steps_rule, score_gold_logprob)
+from experiments.eval_utils import (CODE_TASKS, add_adaptive_step_arguments, add_common_arguments,
+                                    compute_mcnemar_exact_p, get_model_tag, iterate_batches, load_items, save_jsonl,
+                                    score_answer, select_donor_questions)
+from experiments.exp2_adaptive_steps import make_converged_stop_rule
+from experiments.latent_mapping import LatentMapping, build_mapping
+from experiments.latent_pipeline import (LATENT_AGENTS, AgentStats, SharedMemory, StopRule, build_judger_prompts,
+                                         build_memory_per_agent, generate_with_args, load_model,
+                                         repeat_for_each_agent)
 
 ALL_CONDITIONS = ["judger_alone", "prompts_only", "pause", "swapped",
                   "latent_identity", "latent_ridge", "latent_random"]
+# Each entry is (printed name, condition X, condition Y). The report shows X minus Y.
 DECOMPOSITION = [("agent prompts", "prompts_only", "judger_alone"),
                  ("extra positions / compute", "pause", "prompts_only"),
                  ("any real message", "swapped", "pause"),
@@ -52,23 +56,18 @@ DECOMPOSITION = [("agent prompts", "prompts_only", "judger_alone"),
                  ("total", "latent_identity", "judger_alone")]
 
 
-def same_for_all(mapping):
-    return {agent: mapping for agent in LATENT_AGENTS}
-
-
 def main() -> None:
+    """Build and score every memory condition on each batch, then print the report and save the rows."""
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_arguments(parser)
     parser.add_argument("--conditions", default=",".join(ALL_CONDITIONS),
                         help="Comma-separated subset of: " + ", ".join(ALL_CONDITIONS))
     parser.add_argument("--adaptive", action="store_true", help="Adaptive steps, controls matched per row.")
-    parser.add_argument("--max_latent_steps", type=int, default=80)
-    parser.add_argument("--min_latent_steps", type=int, default=5)
-    parser.add_argument("--cosine_threshold", type=float, default=0.99)
+    add_adaptive_step_arguments(parser)
     parser.add_argument("--no_generate", action="store_true", help="Only teacher-forced scores (much faster).")
     args = parser.parse_args()
     torch.manual_seed(args.seed)
-    conditions = [c.strip() for c in args.conditions.split(",") if c.strip()]
+    conditions = [condition.strip() for condition in args.conditions.split(",") if condition.strip()]
     use_logprob = args.task not in CODE_TASKS
 
     model, tokenizer = load_model(args.model_name, args.device)
@@ -78,127 +77,138 @@ def main() -> None:
                 "pause": ConstantMapping(model)}
 
     items = load_items(args.task, args.max_samples, args.toy)
-    donor_items = items[1:] + items[:1]  # each question's donor is the next one
     step_budget = args.max_latent_steps if args.adaptive else args.latent_steps
 
+    def build_memory(memory_questions: List[str], mapping: LatentMapping,
+                     stop_rules: Optional[Dict[str, StopRule]] = None,
+                     latent_steps: int = step_budget) -> Tuple[SharedMemory, AgentStats]:
+        """Return the memory and stats for these questions, with one mapping for all agents."""
+        return build_memory_per_agent(model, tokenizer, memory_questions, model_name=args.model_name,
+                                      task=args.task, latent_steps=latent_steps,
+                                      mappings=repeat_for_each_agent(mapping), think=args.think,
+                                      stop_rules=stop_rules)
+
     rows = []
-    for batch_start in range(0, len(items), args.batch_size):
-        batch = items[batch_start:batch_start + args.batch_size]
-        questions = [item["question"] for item in batch]
-        donors = [item["question"] for item in donor_items[batch_start:batch_start + len(batch)]]
+    for batch_start, batch, questions in iterate_batches(items, args.batch_size):
+        donors = select_donor_questions(items, batch_start, len(batch))
         golds = [str(item.get("gold", "")) for item in batch]
 
-        def build(qs, mapping, stop_rules=None, steps=step_budget):
-            return build_memory_per_agent(model, tokenizer, qs, model_name=args.model_name, task=args.task,
-                                          latent_steps=steps, mappings=same_for_all(mapping), think=args.think,
-                                          stop_rules=stop_rules)
-
-        # 1. The real run decides how many steps each row/agent uses.
+        # 1. The real run decides how many steps each row and agent uses.
         recorder = RecordingMapping(identity)
         first_rules = None
         if args.adaptive:
-            rule = stop_when_converged(args.cosine_threshold, args.min_latent_steps)
-            first_rules = {agent: rule for agent in LATENT_AGENTS}
-        real_memory, real_stats = build(questions, recorder, first_rules)
-        steps = {agent: real_stats[agent]["steps_used"] for agent in LATENT_AGENTS}
-        matched = {agent: make_forced_steps_rule(steps[agent]) for agent in LATENT_AGENTS} if args.adaptive else None
+            first_rules = repeat_for_each_agent(make_converged_stop_rule(args.cosine_threshold,
+                                                                         args.min_latent_steps))
+        real_memory, real_stats = build_memory(questions, recorder, first_rules)
+        steps_used = {agent: real_stats[agent]["steps_used"] for agent in LATENT_AGENTS}
+        matched_rules = None
+        if args.adaptive:
+            matched_rules = {agent: make_forced_steps_rule(steps_used[agent]) for agent in LATENT_AGENTS}
 
-        # How much does W_a change the latent vector? cos(rescale(h W_a), rescale(h)), per row.
+        # This measures how much W_a changes the latent vector: cos(rescale(h W_a), rescale(h)), per row.
         if recorder.hidden_states:
-            hs = torch.stack(recorder.hidden_states).to(model.device)  # [steps_total, batch, d]
-            cos = F.cosine_similarity(ridge(hs.flatten(0, 1)).float(), identity(hs.flatten(0, 1)).float(), dim=-1)
-            ridge_cos = cos.view(hs.shape[0], hs.shape[1]).mean(dim=0).tolist()
+            hidden_states = torch.stack(recorder.hidden_states).to(model.device)  # [steps_total, batch, hidden_dim]
+            flat_hidden = hidden_states.flatten(0, 1)                             # [steps_total * batch, hidden_dim]
+            cosines = cosine_similarity(ridge(flat_hidden).float(), identity(flat_hidden).float(), dim=-1)
+            ridge_cos = cosines.view(hidden_states.shape[0], hidden_states.shape[1]).mean(dim=0).tolist()
         else:
             ridge_cos = [None] * len(batch)
 
-        # 2. Memories for every condition, all with the same per-row step counts.
+        # 2. Build the memory of every condition, all with the same per-row step counts.
         memories = {}
         for condition in conditions:
             if condition == "judger_alone":
                 memories[condition] = None
             elif condition == "prompts_only":
-                memories[condition], _ = build(questions, identity, steps=0)
+                memories[condition], _ = build_memory(questions, identity, latent_steps=0)
             elif condition == "pause":
-                memories[condition], _ = build(questions, mappings["pause"], matched)
+                memories[condition], _ = build_memory(questions, mappings["pause"], matched_rules)
             elif condition == "swapped":
-                memories[condition], _ = build(donors, identity, matched)
+                memories[condition], _ = build_memory(donors, identity, matched_rules)
             elif condition == "latent_identity":
                 memories[condition] = real_memory
             elif condition == "latent_ridge":
-                memories[condition], _ = build(questions, ridge, matched)
+                memories[condition], _ = build_memory(questions, ridge, matched_rules)
             elif condition == "latent_random":
-                memories[condition], _ = build(questions, mappings["random"], matched)
+                memories[condition], _ = build_memory(questions, mappings["random"], matched_rules)
             else:
                 raise ValueError(f"Unknown condition: {condition}")
 
         # 3. Score each condition.
-        gen_prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
-        tf_prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, False)
+        generation_prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
+        teacher_forced_prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, False)
         for condition, memory in memories.items():
             if args.no_generate:
                 results = [{"answer": None, "correct": None} for _ in batch]
             else:
-                answers = generate_text(model, tokenizer, gen_prompts, memory, max_new_tokens=args.max_new_tokens,
-                                        temperature=args.temperature, top_p=args.top_p)
-                results = [{"answer": a, **score_answer(args.task, a, item)} for a, item in zip(answers, batch)]
+                answers = generate_with_args(model, tokenizer, generation_prompts, memory, args)
+                results = [{"answer": answer, **score_answer(args.task, answer, item)}
+                           for answer, item in zip(answers, batch)]
             if use_logprob:
-                logprobs, top1 = score_gold_logprob(model, tokenizer, tf_prompts, golds, memory)
+                logprobs, top1_hits = score_gold_logprob(model, tokenizer, teacher_forced_prompts, golds, memory)
             else:
-                logprobs, top1 = [None] * len(batch), [None] * len(batch)
+                logprobs, top1_hits = [None] * len(batch), [None] * len(batch)
 
             for offset, result in enumerate(results):
                 rows.append({"index": batch_start + offset, "condition": condition, "seed": args.seed,
                              "model": args.model_name, "task": args.task,
-                             "steps_per_agent": {a: steps[a][offset] for a in LATENT_AGENTS},
+                             "steps_per_agent": {agent: steps_used[agent][offset] for agent in LATENT_AGENTS},
                              "ridge_identity_cos": ridge_cos[offset],
-                             "gold_logprob": logprobs[offset], "gold_top1": top1[offset], **result})
+                             "gold_logprob": logprobs[offset], "gold_top1": top1_hits[offset], **result})
         print(f"done {batch_start + len(batch)}/{len(items)}", flush=True)
 
-    report(rows, conditions, args)
+    print_report(rows, conditions, args)
     tag = "adaptive" if args.adaptive else f"m{args.latent_steps}"
-    model_tag = args.model_name.rstrip("/").split("/")[-1]
-    save_jsonl(rows, f"{args.output_dir}/exp5_{model_tag}_{args.task}_{tag}_seed{args.seed}.jsonl")
+    save_jsonl(rows, f"{args.output_dir}/exp5_{get_model_tag(args.model_name)}_{args.task}_{tag}_seed{args.seed}.jsonl")
 
 
-def report(rows, conditions, args) -> None:
-    by = {c: sorted([r for r in rows if r["condition"] == c], key=lambda r: r["index"]) for c in conditions}
+def print_report(rows: List[Dict[str, Any]], conditions: List[str], args: argparse.Namespace) -> None:
+    """Print the score table, the paired decomposition, the mean step counts and the W_a cosine."""
+    rows_by_condition = {condition: sorted([row for row in rows if row["condition"] == condition],
+                                           key=lambda row: row["index"])
+                         for condition in conditions}
     print(f"\n{'condition':<18}{'accuracy':>10}{'mean log p(gold)':>18}{'gold top-1':>12}")
-    for c in conditions:
-        rs = by[c]
-        acc = (sum(bool(r["correct"]) for r in rs) / len(rs)) if not args.no_generate else float("nan")
-        lps = [r["gold_logprob"] for r in rs if r["gold_logprob"] is not None]
-        t1 = [r["gold_top1"] for r in rs if r["gold_top1"] is not None]
-        lp = sum(lps) / len(lps) if lps else float("nan")
-        top = sum(t1) / len(t1) if t1 else float("nan")
-        print(f"{c:<18}{acc:>10.3f}{lp:>18.3f}{top:>12.3f}")
+    for condition in conditions:
+        condition_rows = rows_by_condition[condition]
+        accuracy = float("nan")
+        if not args.no_generate:
+            accuracy = sum(bool(row["correct"]) for row in condition_rows) / len(condition_rows)
+        logprobs = [row["gold_logprob"] for row in condition_rows if row["gold_logprob"] is not None]
+        top1_hits = [row["gold_top1"] for row in condition_rows if row["gold_top1"] is not None]
+        mean_logprob = sum(logprobs) / len(logprobs) if logprobs else float("nan")
+        top1_rate = sum(top1_hits) / len(top1_hits) if top1_hits else float("nan")
+        print(f"{condition:<18}{accuracy:>10.3f}{mean_logprob:>18.3f}{top1_rate:>12.3f}")
 
     print("\nDecomposition (X minus Y, paired on the same questions):")
     print(f"{'part':<28}{'acc diff':>10}{'wins':>6}{'losses':>8}{'p':>8}{'logp diff [95% CI]':>32}")
-    for name, x, y in DECOMPOSITION:
-        if x not in by or y not in by:
+    for name, condition_x, condition_y in DECOMPOSITION:
+        if condition_x not in rows_by_condition or condition_y not in rows_by_condition:
             continue
+        rows_x, rows_y = rows_by_condition[condition_x], rows_by_condition[condition_y]
         line = f"{name:<28}"
         if not args.no_generate:
-            cx = [bool(r["correct"]) for r in by[x]]
-            cy = [bool(r["correct"]) for r in by[y]]
-            wins = sum(a and not b for a, b in zip(cx, cy))
-            losses = sum(b and not a for a, b in zip(cx, cy))
-            line += f"{(wins - losses) / len(cx):>10.3f}{wins:>6}{losses:>8}{compute_mcnemar_exact_p(wins, losses):>8.3f}"
+            correct_x = [bool(row["correct"]) for row in rows_x]
+            correct_y = [bool(row["correct"]) for row in rows_y]
+            wins = sum(hit_x and not hit_y for hit_x, hit_y in zip(correct_x, correct_y))
+            losses = sum(hit_y and not hit_x for hit_x, hit_y in zip(correct_x, correct_y))
+            line += (f"{(wins - losses) / len(correct_x):>10.3f}{wins:>6}{losses:>8}"
+                     f"{compute_mcnemar_exact_p(wins, losses):>8.3f}")
         else:
             line += f"{'-':>10}{'-':>6}{'-':>8}{'-':>8}"
-        lx = [r["gold_logprob"] for r in by[x]]
-        ly = [r["gold_logprob"] for r in by[y]]
-        if None not in lx and None not in ly:
-            mean, (lo, hi) = compute_paired_mean_difference(lx, ly)
-            line += f"{mean:>14.3f} [{lo:>6.3f}, {hi:>6.3f}]"
+        logprobs_x = [row["gold_logprob"] for row in rows_x]
+        logprobs_y = [row["gold_logprob"] for row in rows_y]
+        if None not in logprobs_x and None not in logprobs_y:
+            mean, (lower, upper) = compute_paired_mean_difference(logprobs_x, logprobs_y)
+            line += f"{mean:>14.3f} [{lower:>6.3f}, {upper:>6.3f}]"
         print(line)
 
-    real = by.get("latent_identity") or next(iter(by.values()))
-    means = {a: sum(r["steps_per_agent"][a] for r in real) / len(real) for a in LATENT_AGENTS}
-    print("\nMean latent steps per agent: " + "  ".join(f"{a}={m:.1f}" for a, m in means.items()))
-    cos = [r["ridge_identity_cos"] for r in real if r["ridge_identity_cos"] is not None]
-    if cos:
-        print(f"Mean cos(ridge vector, identity vector): {sum(cos) / len(cos):.4f}  "
+    real_rows = rows_by_condition.get("latent_identity") or next(iter(rows_by_condition.values()))
+    means = {agent: sum(row["steps_per_agent"][agent] for row in real_rows) / len(real_rows)
+             for agent in LATENT_AGENTS}
+    print("\nMean latent steps per agent: " + "  ".join(f"{agent}={mean:.1f}" for agent, mean in means.items()))
+    cosines = [row["ridge_identity_cos"] for row in real_rows if row["ridge_identity_cos"] is not None]
+    if cosines:
+        print(f"Mean cos(ridge vector, identity vector): {sum(cosines) / len(cosines):.4f}  "
               "(about 1.0 means W_a does nothing, as expected for tied embeddings)")
 
 

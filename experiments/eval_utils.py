@@ -10,7 +10,7 @@ import json
 import math
 from itertools import islice
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import data
 from utils import extract_gsm8k_answer, extract_markdown_python_block, normalize_answer, run_with_timeout
@@ -131,7 +131,7 @@ def compute_mcnemar_exact_p(only_a_correct: int, only_b_correct: int) -> float:
     return min(1.0, 2 * tail)
 
 
-def collect_correct_by_condition(rows: List[Dict[str, Any]], conditions: Sequence[str]) -> Dict[str, List[bool]]:
+def collect_correct_by_condition(rows: List[Dict[str, Any]], conditions: Iterable[str]) -> Dict[str, List[bool]]:
     """Return {condition: per-question correctness}, in the order of `rows`, as print_paired_report expects."""
     return {condition: [row["correct"] for row in rows if row["condition"] == condition]
             for condition in conditions}

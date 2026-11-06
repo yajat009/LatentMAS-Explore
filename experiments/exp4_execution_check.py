@@ -1,12 +1,11 @@
-"""Direction 4: let the Judger check its code against the visible test and retry once.
+"""Let the Judger run its code against the visible tests and retry once, to measure what self-repair adds.
 
-MBPP+ and HumanEval+ questions show example asserts. After the Judger answers, we
-run its code against those visible asserts only (never the hidden tests). If they
-fail, the error goes back to the Judger and it writes the code again, on top of
-the same latent memory.
+MBPP+ and HumanEval+ questions show example asserts. After the Judger answers, the script runs
+the code against those visible asserts only, and never against the hidden tests. If the asserts
+fail, the Judger reads the error and writes the code again on top of the same latent memory.
 
-Self-repair helps any pipeline, so it is measured both with and without latent
-memory; the fair comparison is repair-vs-repair:
+Self-repair helps any pipeline, so the script measures it with and without latent memory.
+The fair comparison is repair against repair:
 
     judger_alone / judger_alone+repair
     latent_mas   / latent_mas+repair
@@ -16,24 +15,26 @@ Usage:
 """
 
 import argparse
+from typing import List, Optional, Tuple
 
 import torch
 
-from experiments.eval_utils import (CODE_TASKS, add_common_arguments, load_items, print_paired_report,
-                                    run_code_with_tests, save_jsonl, score_answer)
+from experiments.eval_utils import (CODE_TASKS, add_common_arguments, collect_correct_by_condition, iterate_batches,
+                                    load_items, print_paired_report, run_code_with_tests, save_jsonl, score_answer)
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import build_agent_messages, build_latent_memory, generate_text, load_model, render_prompts
+from experiments.latent_pipeline import (ChatMessages, SharedMemory, build_agent_messages, build_latent_memory,
+                                         generate_with_args, load_model, render_prompts)
 from utils import extract_markdown_python_block
 
 
-def visible_tests(question: str) -> str:
-    """The assert lines shown inside the question text."""
+def extract_visible_tests(question: str) -> str:
+    """Return the assert lines shown inside the question text."""
     return "\n".join(line.strip() for line in question.splitlines() if line.strip().startswith("assert"))
 
 
-def check_against_visible_tests(answer: str, question: str):
-    """Returns (passed, short error message for the Judger)."""
-    tests = visible_tests(question)
+def check_against_visible_tests(answer: str, question: str) -> Tuple[bool, Optional[str]]:
+    """Return (passed, short error message for the Judger)."""
+    tests = extract_visible_tests(question)
     code = extract_markdown_python_block(answer)
     if code is None:
         return False, "No ```python code block was found in your answer."
@@ -44,13 +45,15 @@ def check_against_visible_tests(answer: str, question: str):
     return passed, short_error
 
 
-def repair_messages(judger_messages, answer: str, error: str):
+def build_repair_messages(judger_messages: ChatMessages, answer: str, error: str) -> ChatMessages:
+    """Return the Judger's chat with its failed answer and the error added, so that it can try again."""
     feedback = (f"Your code failed this visible test:\n{error}\n\n"
                 "Fix the code and output the complete corrected solution in a ```python code block.")
     return judger_messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": feedback}]
 
 
 def main() -> None:
+    """Generate, check and repair answers on each batch, then print the paired report and save the rows."""
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_arguments(parser)
     parser.set_defaults(task="mbppplus")
@@ -62,32 +65,31 @@ def main() -> None:
     mapping = build_mapping("identity", model)
     items = load_items(args.task, args.max_samples, args.toy)
 
-    def generate(messages_batch, memory):
+    def generate_answers(messages_batch: List[ChatMessages], memory: Optional[SharedMemory]) -> List[str]:
+        """Render the chats and decode one answer per chat on top of `memory`."""
         prompts = render_prompts(tokenizer, messages_batch, args.think)
-        return generate_text(model, tokenizer, prompts, memory, max_new_tokens=args.max_new_tokens,
-                             temperature=args.temperature, top_p=args.top_p)
+        return generate_with_args(model, tokenizer, prompts, memory, args)
 
     rows = []
-    for batch_start in range(0, len(items), args.batch_size):
-        batch = items[batch_start:batch_start + args.batch_size]
-        questions = [item["question"] for item in batch]
+    for batch_start, batch, questions in iterate_batches(items, args.batch_size):
         judger_messages = build_agent_messages(args.model_name, args.task, "judger", questions)
         latent_memory, _ = build_latent_memory(model, tokenizer, questions, model_name=args.model_name,
                                                task=args.task, latent_steps=args.latent_steps,
                                                mapping=mapping, think=args.think)
 
         for name, memory in {"judger_alone": None, "latent_mas": latent_memory}.items():
-            first_answers = generate(judger_messages, memory)
-            checks = [check_against_visible_tests(a, q) for a, q in zip(first_answers, questions)]
+            first_answers = generate_answers(judger_messages, memory)
+            checks = [check_against_visible_tests(answer, question)
+                      for answer, question in zip(first_answers, questions)]
 
-            # Retry only the rows that failed their visible test; the others keep their first answer.
+            # Only the rows that failed their visible test retry. The others keep their first answer.
             failed_rows = [i for i, (passed, _) in enumerate(checks) if not passed]
             final_answers = list(first_answers)
             if failed_rows:
-                retry_messages = [repair_messages(judger_messages[i], first_answers[i], checks[i][1])
+                retry_messages = [build_repair_messages(judger_messages[i], first_answers[i], checks[i][1])
                                   for i in failed_rows]
                 retry_memory = memory.select_rows(failed_rows) if memory is not None else None
-                for i, answer in zip(failed_rows, generate(retry_messages, retry_memory)):
+                for i, answer in zip(failed_rows, generate_answers(retry_messages, retry_memory)):
                     final_answers[i] = answer
 
             for offset, item in enumerate(batch):
@@ -97,8 +99,7 @@ def main() -> None:
         print(f"done {batch_start + len(batch)}/{len(items)}")
 
     conditions = ["judger_alone", "judger_alone+repair", "latent_mas", "latent_mas+repair"]
-    correct_by_condition = {c: [r["correct"] for r in rows if r["condition"] == c] for c in conditions}
-    print_paired_report(correct_by_condition, baseline="judger_alone")
+    print_paired_report(collect_correct_by_condition(rows, conditions), baseline="judger_alone")
     save_jsonl(rows, f"{args.output_dir}/exp4_{args.task}_m{args.latent_steps}.jsonl")
 
 

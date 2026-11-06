@@ -1,11 +1,14 @@
-"""Direction 2: let each question (and each agent) decide how many latent steps it needs.
+"""Let each question and each agent choose its number of latent steps, to test whether adaptive budgets beat a fixed m.
 
-Instead of one fixed m per task, a row stops thinking when either
+In place of one fixed m per task, a row stops when one of these conditions holds:
+
     converged   its hidden state stops moving: cosine(h_t, h_{t-1}) > --cosine_threshold
     confident   the model is sure of its next token: entropy(softmax(h W_out^T)) < --entropy_threshold
-Both are capped at --max_latent_steps.
 
-Conditions compared on the same questions:
+Both rules stop at --max_latent_steps at the latest.
+
+The script compares these conditions on the same questions:
+
     fixed_m{latent_steps}, fixed_m{max_latent_steps}, stop_when_converged, stop_when_confident
 
 Usage:
@@ -15,34 +18,40 @@ Usage:
 import argparse
 
 import torch
-import torch.nn.functional as F
+from torch.nn.functional import cosine_similarity
+from transformers import PreTrainedModel
 
-from experiments.eval_utils import add_common_arguments, load_items, print_paired_report, save_jsonl, score_answer
+from experiments.eval_utils import (add_adaptive_step_arguments, add_common_arguments, collect_correct_by_condition,
+                                    iterate_batches, load_items, print_paired_report, save_jsonl, score_answer)
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import build_latent_memory, generate_text, build_judger_prompts, load_model
+from experiments.latent_pipeline import (StopRule, build_judger_prompts, build_latent_memory, generate_with_args,
+                                         load_model)
 
 
-def stop_when_converged(cosine_threshold: float, min_steps: int):
-    def should_stop(step, previous_hidden, hidden):
-        converged = F.cosine_similarity(hidden.float(), previous_hidden.float(), dim=-1) > cosine_threshold
+def make_converged_stop_rule(cosine_threshold: float, min_steps: int) -> StopRule:
+    """Return a stop rule that stops a row once its hidden state stops moving, after at least min_steps."""
+    def should_stop(step: int, previous_hidden: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        """Return True for each row whose last two hidden states are almost parallel."""
+        converged = cosine_similarity(hidden.float(), previous_hidden.float(), dim=-1) > cosine_threshold
         return converged & (step + 1 >= min_steps)
     return should_stop
 
 
-def stop_when_confident(model, entropy_threshold: float, min_steps: int):
-    def should_stop(step, previous_hidden, hidden):
-        log_probs = torch.log_softmax(model.get_output_embeddings()(hidden).float(), dim=-1)
+def make_confident_stop_rule(model: PreTrainedModel, entropy_threshold: float, min_steps: int) -> StopRule:
+    """Return a stop rule that stops a row once its next-token entropy is low, after at least min_steps."""
+    def should_stop(step: int, previous_hidden: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        """Return True for each row whose next-token distribution has low entropy."""
+        log_probs = torch.log_softmax(model.get_output_embeddings()(hidden).float(), dim=-1)  # [batch, vocab]
         entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
         return (entropy < entropy_threshold) & (step + 1 >= min_steps)
     return should_stop
 
 
 def main() -> None:
+    """Run every step budget on each batch, then print the mean steps and the paired report, and save the rows."""
     parser = argparse.ArgumentParser(description=__doc__)
     add_common_arguments(parser)
-    parser.add_argument("--max_latent_steps", type=int, default=80)
-    parser.add_argument("--min_latent_steps", type=int, default=5)
-    parser.add_argument("--cosine_threshold", type=float, default=0.99)
+    add_adaptive_step_arguments(parser)
     parser.add_argument("--entropy_threshold", type=float, default=1.0)
     args = parser.parse_args()
     torch.manual_seed(args.seed)
@@ -55,39 +64,35 @@ def main() -> None:
         f"fixed_m{args.latent_steps}": (args.latent_steps, None),
         f"fixed_m{args.max_latent_steps}": (args.max_latent_steps, None),
         "stop_when_converged": (args.max_latent_steps,
-                                stop_when_converged(args.cosine_threshold, args.min_latent_steps)),
+                                make_converged_stop_rule(args.cosine_threshold, args.min_latent_steps)),
         "stop_when_confident": (args.max_latent_steps,
-                                stop_when_confident(model, args.entropy_threshold, args.min_latent_steps)),
+                                make_confident_stop_rule(model, args.entropy_threshold, args.min_latent_steps)),
     }
 
     items = load_items(args.task, args.max_samples, args.toy)
     rows = []
-    for batch_start in range(0, len(items), args.batch_size):
-        batch = items[batch_start:batch_start + args.batch_size]
-        questions = [item["question"] for item in batch]
+    for batch_start, batch, questions in iterate_batches(items, args.batch_size):
         prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
 
         for name, (step_budget, stop_rule) in conditions.items():
             memory, stats = build_latent_memory(model, tokenizer, questions, model_name=args.model_name,
                                                 task=args.task, latent_steps=step_budget, mapping=mapping,
                                                 think=args.think, should_stop=stop_rule)
-            answers = generate_text(model, tokenizer, prompts, memory, max_new_tokens=args.max_new_tokens,
-                                    temperature=args.temperature, top_p=args.top_p)
+            answers = generate_with_args(model, tokenizer, prompts, memory, args)
             for offset, (item, answer) in enumerate(zip(batch, answers)):
-                steps_per_agent = {agent: s["steps_used"][offset] for agent, s in stats.items()}
+                steps_per_agent = {agent: agent_stats["steps_used"][offset] for agent, agent_stats in stats.items()}
                 rows.append({"index": batch_start + offset, "condition": name, "answer": answer,
                              "steps_per_agent": steps_per_agent, **score_answer(args.task, answer, item)})
         print(f"done {batch_start + len(batch)}/{len(items)}")
 
     print("\nMean latent steps per agent:")
     for name in conditions:
-        rows_for = [r for r in rows if r["condition"] == name]
-        means = {agent: sum(r["steps_per_agent"][agent] for r in rows_for) / len(rows_for)
-                 for agent in rows_for[0]["steps_per_agent"]}
+        condition_rows = [row for row in rows if row["condition"] == name]
+        means = {agent: sum(row["steps_per_agent"][agent] for row in condition_rows) / len(condition_rows)
+                 for agent in condition_rows[0]["steps_per_agent"]}
         print(f"  {name:<22} " + "  ".join(f"{agent}={mean:.1f}" for agent, mean in means.items()))
 
-    correct_by_condition = {name: [r["correct"] for r in rows if r["condition"] == name] for name in conditions}
-    print_paired_report(correct_by_condition, baseline=f"fixed_m{args.latent_steps}")
+    print_paired_report(collect_correct_by_condition(rows, conditions), baseline=f"fixed_m{args.latent_steps}")
     save_jsonl(rows, f"{args.output_dir}/exp2_{args.task}.jsonl")
 
 
