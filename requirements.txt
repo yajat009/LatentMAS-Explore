@@ -1,4 +1,4 @@
-transformers
+transformers==4.57.1  # 5.x breaks models.py:_past_length
 torch
 numpy
 tqdm

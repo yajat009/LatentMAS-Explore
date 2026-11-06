@@ -6,7 +6,6 @@ from models import ModelWrapper
 from prompts import build_agent_messages_hierarchical_text_mas, build_agent_messages_sequential_text_mas
 from utils import extract_gsm8k_answer, normalize_answer, extract_markdown_python_block, run_with_timeout
 import argparse
-import pdb
 
 class TextMASMethod:
     def __init__(

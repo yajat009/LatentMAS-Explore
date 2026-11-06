@@ -10,7 +10,6 @@ try:
     from vllm import SamplingParams
 except ImportError:  # HF backend does not need vLLM
     SamplingParams = None
-import pdb
 
 class LatentMASMethod:
     def __init__(
