@@ -22,7 +22,7 @@ import torch
 from experiments.eval_utils import (CODE_TASKS, add_common_arguments, load_items, print_paired_report,
                                     run_code_with_tests, save_jsonl, score_answer)
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import agent_messages, build_latent_memory, generate_text, load_model, render_prompts
+from experiments.latent_pipeline import build_agent_messages, build_latent_memory, generate_text, load_model, render_prompts
 from utils import extract_markdown_python_block
 
 
@@ -71,7 +71,7 @@ def main() -> None:
     for batch_start in range(0, len(items), args.batch_size):
         batch = items[batch_start:batch_start + args.batch_size]
         questions = [item["question"] for item in batch]
-        judger_messages = agent_messages(args.model_name, args.task, "judger", questions)
+        judger_messages = build_agent_messages(args.model_name, args.task, "judger", questions)
         latent_memory, _ = build_latent_memory(model, tokenizer, questions, model_name=args.model_name,
                                                task=args.task, latent_steps=args.latent_steps,
                                                mapping=mapping, think=args.think)

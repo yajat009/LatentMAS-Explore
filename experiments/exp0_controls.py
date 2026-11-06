@@ -20,7 +20,7 @@ import torch
 
 from experiments.eval_utils import add_common_arguments, load_items, print_paired_report, save_jsonl, score_answer
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import build_latent_memory, generate_text, judger_prompts, load_model
+from experiments.latent_pipeline import build_latent_memory, generate_text, build_judger_prompts, load_model
 
 CONDITIONS = ["judger_alone", "latent_identity", "latent_ridge", "swapped_memory"]
 
@@ -54,7 +54,7 @@ def main() -> None:
             "latent_ridge": latent_memory(questions, "ridge"),
             "swapped_memory": latent_memory(donors, "identity"),
         }
-        prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
+        prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
 
         for condition, memory in memory_by_condition.items():
             answers = generate_text(model, tokenizer, prompts, memory, max_new_tokens=args.max_new_tokens,

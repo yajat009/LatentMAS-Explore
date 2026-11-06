@@ -15,6 +15,7 @@ from collections import defaultdict
 
 import torch
 
+from experiments.audit_utils import compute_bootstrap_ci
 from experiments.exp5_content_audit import DECOMPOSITION
 
 
@@ -43,12 +44,6 @@ def permutation_p(diffs: torch.Tensor, n_perm: int = 20000, seed: int = 0) -> fl
     signs = torch.randint(0, 2, (n_perm, len(diffs)), generator=generator).double() * 2 - 1
     null = (signs * diffs).mean(1).abs()
     return ((null >= diffs.mean().abs() - 1e-12).sum().item() + 1) / (n_perm + 1)
-
-
-def bootstrap_ci(diffs: torch.Tensor, n_boot: int = 5000, seed: int = 0):
-    generator = torch.Generator().manual_seed(seed)
-    means = diffs[torch.randint(0, len(diffs), (n_boot, len(diffs)), generator=generator)].mean(1)
-    return means.quantile(0.025).item(), means.quantile(0.975).item()
 
 
 def holm(pvalues):
@@ -83,7 +78,7 @@ def main() -> None:
         dx = torch.tensor([mx[ix.index(i)].item() for i in common], dtype=torch.float64)
         dy = torch.tensor([my[iy.index(i)].item() for i in common], dtype=torch.float64)
         diffs = dx - dy
-        results.append((name, diffs.mean().item(), bootstrap_ci(diffs), permutation_p(diffs), len(common)))
+        results.append((name, diffs.mean().item(), compute_bootstrap_ci(diffs), permutation_p(diffs), len(common)))
 
     if results:
         adjusted = holm([r[3] for r in results])
@@ -99,7 +94,7 @@ def main() -> None:
             common = sorted(set(logp[x]) & set(logp[y]))
             diffs = torch.tensor([sum(logp[x][i]) / len(logp[x][i]) - sum(logp[y][i]) / len(logp[y][i])
                                   for i in common], dtype=torch.float64)
-            lo, hi = bootstrap_ci(diffs)
+            lo, hi = compute_bootstrap_ci(diffs)
             print(f"{name:<28}{diffs.mean().item():>18.3f}{f'[{lo:.3f}, {hi:.3f}]':>22}")
 
 

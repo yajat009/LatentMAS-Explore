@@ -25,11 +25,12 @@ from collections import defaultdict
 
 import torch
 
-from experiments.audit_utils import (ConstantMapping, RecordingMapping, ReplayMapping, build_memory_per_agent,
-                                     gold_logprob, paired_mean_difference)
+from experiments.latent_pipeline import build_memory_per_agent
+from experiments.audit_utils import (ConstantMapping, RecordingMapping, ReplayMapping,
+                                     score_gold_logprob, compute_paired_mean_difference)
 from experiments.eval_utils import CODE_TASKS, add_common_arguments, load_items, save_jsonl
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import LATENT_AGENTS, judger_prompts, load_model
+from experiments.latent_pipeline import LATENT_AGENTS, build_judger_prompts, load_model
 
 
 def gold_first_token_ids(tokenizer, gold: str):
@@ -83,7 +84,7 @@ def main() -> None:
         questions = [item["question"] for item in batch]
         donors = [item["question"] for item in donor_items[batch_start:batch_start + len(batch)]]
         golds = [str(item.get("gold", "")) for item in batch]
-        prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, False)
+        prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, False)
 
         def build(qs, agent_mappings):
             return build_memory_per_agent(model, tokenizer, qs, model_name=args.model_name, task=args.task,
@@ -95,17 +96,17 @@ def main() -> None:
         # Donor run: the latent vectors each agent produced on a different question.
         _, donor_stats = build(donors, {agent: mapping for agent in LATENT_AGENTS})
 
-        scores = {"real": gold_logprob(model, tokenizer, prompts, golds, real_memory)[0],
-                  "no_memory": gold_logprob(model, tokenizer, prompts, golds, None)[0]}
+        scores = {"real": score_gold_logprob(model, tokenizer, prompts, golds, real_memory)[0],
+                  "no_memory": score_gold_logprob(model, tokenizer, prompts, golds, None)[0]}
         for agent in LATENT_AGENTS:
             swap = {a: mapping for a in LATENT_AGENTS}
             swap[agent] = ReplayMapping(donor_stats[agent]["latent_vectors"])
-            scores[f"swap_{agent}"] = gold_logprob(model, tokenizer, prompts, golds, build(questions, swap)[0])[0]
+            scores[f"swap_{agent}"] = score_gold_logprob(model, tokenizer, prompts, golds, build(questions, swap)[0])[0]
             paused = {a: mapping for a in LATENT_AGENTS}
             paused[agent] = pause
-            scores[f"pause_{agent}"] = gold_logprob(model, tokenizer, prompts, golds, build(questions, paused)[0])[0]
+            scores[f"pause_{agent}"] = score_gold_logprob(model, tokenizer, prompts, golds, build(questions, paused)[0])[0]
         swap_all = {a: ReplayMapping(donor_stats[a]["latent_vectors"]) for a in LATENT_AGENTS}
-        scores["swap_all"] = gold_logprob(model, tokenizer, prompts, golds, build(questions, swap_all)[0])[0]
+        scores["swap_all"] = score_gold_logprob(model, tokenizer, prompts, golds, build(questions, swap_all)[0])[0]
 
         lens = {agent: logit_lens(model, tokenizer, recorders[agent].hidden_states, golds, args.top_k)
                 for agent in LATENT_AGENTS}
@@ -128,7 +129,7 @@ def report(rows, args) -> None:
     for name in rows[0]["gold_logprob"]:
         if name == "real":
             continue
-        mean, (lo, hi) = paired_mean_difference(real, [r["gold_logprob"][name] for r in rows])
+        mean, (lo, hi) = compute_paired_mean_difference(real, [r["gold_logprob"][name] for r in rows])
         print(f"{name:<18}{mean:>12.3f}   [{lo:>7.3f}, {hi:>7.3f}]")
 
     print("\nLogit lens: median rank of the gold answer's first token (1 = top choice)")

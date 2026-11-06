@@ -33,14 +33,15 @@ import argparse
 import torch
 import torch.nn.functional as F
 
+from experiments.latent_pipeline import build_memory_per_agent
 from experiments.audit_utils import (ConstantMapping, RandomRotationMapping, RecordingMapping,
-                                     build_memory_per_agent, forced_steps_rule, gold_logprob,
-                                     paired_mean_difference)
-from experiments.eval_utils import (CODE_TASKS, add_common_arguments, load_items, mcnemar_exact_p, save_jsonl,
+                                     make_forced_steps_rule, score_gold_logprob,
+                                     compute_paired_mean_difference)
+from experiments.eval_utils import (CODE_TASKS, add_common_arguments, load_items, compute_mcnemar_exact_p, save_jsonl,
                                     score_answer)
 from experiments.exp2_adaptive_steps import stop_when_converged
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import LATENT_AGENTS, generate_text, judger_prompts, load_model
+from experiments.latent_pipeline import LATENT_AGENTS, generate_text, build_judger_prompts, load_model
 
 ALL_CONDITIONS = ["judger_alone", "prompts_only", "pause", "swapped",
                   "latent_identity", "latent_ridge", "latent_random"]
@@ -100,7 +101,7 @@ def main() -> None:
             first_rules = {agent: rule for agent in LATENT_AGENTS}
         real_memory, real_stats = build(questions, recorder, first_rules)
         steps = {agent: real_stats[agent]["steps_used"] for agent in LATENT_AGENTS}
-        matched = {agent: forced_steps_rule(steps[agent]) for agent in LATENT_AGENTS} if args.adaptive else None
+        matched = {agent: make_forced_steps_rule(steps[agent]) for agent in LATENT_AGENTS} if args.adaptive else None
 
         # How much does W_a change the latent vector? cos(rescale(h W_a), rescale(h)), per row.
         if recorder.hidden_states:
@@ -131,8 +132,8 @@ def main() -> None:
                 raise ValueError(f"Unknown condition: {condition}")
 
         # 3. Score each condition.
-        gen_prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
-        tf_prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, False)
+        gen_prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
+        tf_prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, False)
         for condition, memory in memories.items():
             if args.no_generate:
                 results = [{"answer": None, "correct": None} for _ in batch]
@@ -141,7 +142,7 @@ def main() -> None:
                                         temperature=args.temperature, top_p=args.top_p)
                 results = [{"answer": a, **score_answer(args.task, a, item)} for a, item in zip(answers, batch)]
             if use_logprob:
-                logprobs, top1 = gold_logprob(model, tokenizer, tf_prompts, golds, memory)
+                logprobs, top1 = score_gold_logprob(model, tokenizer, tf_prompts, golds, memory)
             else:
                 logprobs, top1 = [None] * len(batch), [None] * len(batch)
 
@@ -182,13 +183,13 @@ def report(rows, conditions, args) -> None:
             cy = [bool(r["correct"]) for r in by[y]]
             wins = sum(a and not b for a, b in zip(cx, cy))
             losses = sum(b and not a for a, b in zip(cx, cy))
-            line += f"{(wins - losses) / len(cx):>10.3f}{wins:>6}{losses:>8}{mcnemar_exact_p(wins, losses):>8.3f}"
+            line += f"{(wins - losses) / len(cx):>10.3f}{wins:>6}{losses:>8}{compute_mcnemar_exact_p(wins, losses):>8.3f}"
         else:
             line += f"{'-':>10}{'-':>6}{'-':>8}{'-':>8}"
         lx = [r["gold_logprob"] for r in by[x]]
         ly = [r["gold_logprob"] for r in by[y]]
         if None not in lx and None not in ly:
-            mean, (lo, hi) = paired_mean_difference(lx, ly)
+            mean, (lo, hi) = compute_paired_mean_difference(lx, ly)
             line += f"{mean:>14.3f} [{lo:>6.3f}, {hi:>6.3f}]"
         print(line)
 

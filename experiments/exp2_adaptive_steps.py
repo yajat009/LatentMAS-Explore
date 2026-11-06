@@ -19,7 +19,7 @@ import torch.nn.functional as F
 
 from experiments.eval_utils import add_common_arguments, load_items, print_paired_report, save_jsonl, score_answer
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import build_latent_memory, generate_text, judger_prompts, load_model
+from experiments.latent_pipeline import build_latent_memory, generate_text, build_judger_prompts, load_model
 
 
 def stop_when_converged(cosine_threshold: float, min_steps: int):
@@ -65,7 +65,7 @@ def main() -> None:
     for batch_start in range(0, len(items), args.batch_size):
         batch = items[batch_start:batch_start + args.batch_size]
         questions = [item["question"] for item in batch]
-        prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
+        prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
 
         for name, (step_budget, stop_rule) in conditions.items():
             memory, stats = build_latent_memory(model, tokenizer, questions, model_name=args.model_name,

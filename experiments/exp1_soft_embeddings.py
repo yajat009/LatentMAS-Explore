@@ -21,8 +21,8 @@ import torch
 import torch.nn.functional as F
 
 from experiments.eval_utils import add_common_arguments, load_items, print_paired_report, save_jsonl, score_answer
-from experiments.latent_mapping import build_mapping, input_embedding_matrix
-from experiments.latent_pipeline import build_latent_memory, generate_text, judger_prompts, load_model
+from experiments.latent_mapping import build_mapping, get_input_embedding_matrix
+from experiments.latent_pipeline import build_latent_memory, generate_text, build_judger_prompts, load_model
 
 
 def drift_diagnostics(latent_vectors, token_embeddings_normed):
@@ -50,14 +50,14 @@ def main() -> None:
         mappings[f"soft_tau{tau}"] = build_mapping("soft", model, temperature=tau, top_k=args.soft_top_k)
     mappings["mix"] = build_mapping("mix", model, temperature=args.soft_temperatures[-1],
                                     top_k=args.soft_top_k, alpha=args.mix_alpha)
-    token_embeddings_normed = F.normalize(input_embedding_matrix(model).float(), dim=-1)
+    token_embeddings_normed = F.normalize(get_input_embedding_matrix(model).float(), dim=-1)
 
     items = load_items(args.task, args.max_samples, args.toy)
     rows = []
     for batch_start in range(0, len(items), args.batch_size):
         batch = items[batch_start:batch_start + args.batch_size]
         questions = [item["question"] for item in batch]
-        prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
+        prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
 
         for name, mapping in mappings.items():
             memory, stats = build_latent_memory(model, tokenizer, questions, model_name=args.model_name,

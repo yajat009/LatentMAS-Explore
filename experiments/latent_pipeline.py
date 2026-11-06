@@ -1,41 +1,55 @@
-"""A small, self-contained LatentMAS pipeline shared by every experiment.
+"""Run one small LatentMAS pipeline, so that every experiment compares conditions on correct batching.
 
-It follows the repo's sequential setup (Planner -> Critic -> Refiner think in latent
-space, the Judger writes the answer) and reuses the repo's prompts and scorers, but
-fixes the batching bugs found in models.py:
+LatentMAS (latent multi-agent system) has four agents. The Planner, the Critic and the Refiner
+write no text. Each one reads its prompt on top of a shared KV cache (key/value cache), then takes
+latent steps. A latent step feeds the last-layer hidden state back as the next input.
+The Judger then writes the answer on top of the whole cache.
 
-  * prompts are padded on the LEFT, so the last column is always a real token and
-    latent steps start from a real hidden state, not a pad;
-  * the real attention mask is carried across agents instead of an all-ones mask,
-    so pad positions from one agent are never visible to the next;
-  * RoPE positions count only real tokens, so a padded row sees exactly the same
-    positions it would see on its own (batch size no longer changes results).
+This module follows the repo's sequential layout and reuses the repo's prompts.
+It also fixes three batching bugs in models.py:
 
-Everything an agent leaves behind lives in a SharedMemory: the KV cache, its mask,
-and a list of named segments so experiments can drop parts of it.
+  * The tokenizer pads prompts on the left. The last column is then always a real token,
+    so latent steps start from a real hidden state and not from a pad.
+  * The pipeline carries the real attention mask across agents, in place of an all-ones mask.
+    The next agent therefore never sees the pad positions of an earlier agent.
+  * RoPE (rotary position embedding) positions count only real tokens. A padded row then sees
+    the same positions that it sees alone, so the batch size does not change the results.
+
+A SharedMemory object holds what the agents leave behind: the KV cache, its mask, and a list of
+named segments. Experiments use the segments to drop parts of the cache.
 """
 
+import argparse
 import copy
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
+from transformers import (AutoModelForCausalLM, AutoTokenizer, DynamicCache, PreTrainedModel,
+                          PreTrainedTokenizerBase)
 
+from experiments.latent_mapping import LatentMapping
 from prompts import build_agent_message_sequential_latent_mas
 
 LATENT_AGENTS = ["planner", "critic", "refiner"]
 
-# should_stop(step, previous_hidden, hidden) -> bool tensor [batch]; True = this row is done.
+# should_stop(step, previous_hidden, hidden) -> bool tensor [batch]. True means that the row is done.
 StopRule = Callable[[int, torch.Tensor, torch.Tensor], torch.Tensor]
+
+# One entry per latent agent: {"steps_used": [per row], "latent_vectors": [per step, [batch, hidden_dim]]}.
+AgentStats = Dict[str, Dict[str, Any]]
+
+ChatMessages = List[Dict[str, str]]
+
+PerAgentValue = TypeVar("PerAgentValue")
 
 
 # --------------------------------------------------------------------------- model
 
 
 def pick_device(device: str = "auto") -> str:
-    """'auto' picks a CUDA GPU, then an Apple-silicon GPU (mps), then the CPU."""
+    """Return the device to use: for 'auto', a CUDA GPU, then an Apple-silicon GPU (mps), then the CPU."""
     if device != "auto":
         return device
     if torch.cuda.is_available():
@@ -46,14 +60,14 @@ def pick_device(device: str = "auto") -> str:
 
 
 def pick_dtype(device: str) -> torch.dtype:
-    """bf16 on GPUs that support it, fp16 on older ones (e.g. Colab's T4), fp32 elsewhere."""
+    """Return bf16 on GPUs that support it, fp16 on older GPUs (for example Colab's T4), and fp32 elsewhere."""
     if device.startswith("cuda"):
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     return torch.float32
 
 
-def load_model(model_name: str, device: str = "auto"):
-    """Load a causal LM and its tokenizer, set up for left padding."""
+def load_model(model_name: str, device: str = "auto") -> Tuple[PreTrainedModel, PreTrainedTokenizerBase]:
+    """Load a causal language model and its tokenizer, with the tokenizer set to pad on the left."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = "left"
     if tokenizer.pad_token is None:
@@ -70,7 +84,7 @@ def load_model(model_name: str, device: str = "auto"):
 
 @dataclass
 class Segment:
-    """A named slice [start, end) of the shared KV cache."""
+    """Name the slice [start, end) of the shared KV cache, so that experiments can keep or drop it."""
     agent: str
     kind: str  # "prompt" or "latent"
     start: int
@@ -79,14 +93,15 @@ class Segment:
 
 @dataclass
 class SharedMemory:
-    """The KV cache that agents pass along, plus what is needed to read it correctly."""
+    """Hold the KV cache that the agents pass along, and the data needed to read it correctly."""
     cache: DynamicCache
-    attention_mask: torch.Tensor  # [batch, cache_len]; 1 = real entry, 0 = padding
-    next_position: torch.Tensor   # [batch]; RoPE position of the row's next real token
+    attention_mask: torch.Tensor  # [batch, cache_len]. 1 = real entry, 0 = padding.
+    next_position: torch.Tensor   # [batch]. RoPE position of the row's next real token.
     segments: List[Segment] = field(default_factory=list)
 
     @classmethod
-    def empty(cls, batch_size: int, device) -> "SharedMemory":
+    def empty(cls, batch_size: int, device: Union[str, torch.device]) -> "SharedMemory":
+        """Return a memory with no cached positions, which is the state before the first agent."""
         return cls(
             cache=DynamicCache(),
             attention_mask=torch.zeros(batch_size, 0, dtype=torch.long, device=device),
@@ -95,14 +110,15 @@ class SharedMemory:
 
     @property
     def length(self) -> int:
+        """Return the number of cache columns, including padding."""
         return self.attention_mask.shape[1]
 
     def copy(self) -> "SharedMemory":
-        """Deep copy, so decoding on top of it doesn't change the original."""
+        """Return a deep copy, because decoding on top of a memory grows it in place."""
         return copy.deepcopy(self)
 
     def select_rows(self, rows: List[int]) -> "SharedMemory":
-        """Return a new memory holding only some batch rows (e.g. the questions to retry)."""
+        """Return a new memory that holds only some batch rows, for example the questions to retry."""
         index = torch.tensor(rows, dtype=torch.long, device=self.attention_mask.device)
         selected_cache = DynamicCache()
         for layer_idx, layer in enumerate(self.cache.layers):
@@ -111,23 +127,24 @@ class SharedMemory:
                             list(self.segments))
 
     def keep_only(self, keep_segment: Callable[[Segment], bool]) -> "SharedMemory":
-        """Return a new memory holding only the segments for which keep_segment is True.
+        """Return a new memory that holds only the segments for which keep_segment is True.
 
-        next_position is NOT reset: new tokens continue from the original length, so
-        they never reuse a RoPE position that a kept key already has.
+        This method does not reset next_position. New tokens continue from the original length,
+        so they never reuse a RoPE position that a kept key already has.
         """
-        kept = [s for s in self.segments if keep_segment(s)]
-        index = torch.tensor([i for s in kept for i in range(s.start, s.end)],
+        kept_segments = [segment for segment in self.segments if keep_segment(segment)]
+        index = torch.tensor([i for segment in kept_segments for i in range(segment.start, segment.end)],
                              dtype=torch.long, device=self.attention_mask.device)
 
         trimmed_cache = DynamicCache()
         for layer_idx, layer in enumerate(self.cache.layers):
+            # keys and values have the shape [batch, heads, positions, head_dim].
             trimmed_cache.update(layer.keys[:, :, index], layer.values[:, :, index], layer_idx)
 
         new_segments, cursor = [], 0
-        for s in kept:
-            size = s.end - s.start
-            new_segments.append(Segment(s.agent, s.kind, cursor, cursor + size))
+        for segment in kept_segments:
+            size = segment.end - segment.start
+            new_segments.append(Segment(segment.agent, segment.kind, cursor, cursor + size))
             cursor += size
 
         return SharedMemory(trimmed_cache, self.attention_mask[:, index], self.next_position.clone(), new_segments)
@@ -136,20 +153,24 @@ class SharedMemory:
 # --------------------------------------------------------------------------- forward passes
 
 
-def tokenize_left_padded(tokenizer, texts: List[str], device):
+def tokenize_left_padded(tokenizer: PreTrainedTokenizerBase, texts: List[str],
+                         device: Union[str, torch.device]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return input ids and attention mask, both [batch, width]. load_model set the padding side to left."""
     encoded = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False)
     return encoded["input_ids"].to(device), encoded["attention_mask"].to(device)
 
 
 @torch.no_grad()
-def append_to_memory(model, memory: SharedMemory, new_mask: torch.Tensor, *,
-                     input_ids=None, inputs_embeds=None):
-    """Run new tokens (ids or embeddings) on top of the memory and grow it in place.
+def append_to_memory(model: PreTrainedModel, memory: SharedMemory, new_mask: torch.Tensor, *,
+                     input_ids: Optional[torch.Tensor] = None,
+                     inputs_embeds: Optional[torch.Tensor] = None) -> Any:
+    """Run new tokens (ids or embeddings) on top of the memory and grow the memory in place.
 
-    Returns the model outputs; outputs.hidden_states[-1][:, -1] is the hidden state
-    of each row's newest token (always real, thanks to left padding).
+    The function returns the model outputs. outputs.hidden_states[-1][:, -1] is the hidden state
+    of the newest token of each row. Left padding makes that token a real token.
     """
-    positions = memory.next_position.unsqueeze(1) + new_mask.cumsum(dim=1) - 1
+    positions = memory.next_position.unsqueeze(1) + new_mask.cumsum(dim=1) - 1  # [batch, new_tokens]
+    # Leading pads of an empty memory get -1. The mask hides those columns, so 0 is safe.
     positions = positions.clamp_min(0)
 
     outputs = model(
@@ -167,36 +188,39 @@ def append_to_memory(model, memory: SharedMemory, new_mask: torch.Tensor, *,
     return outputs
 
 
-def render_prompts(tokenizer, messages_batch, think: bool) -> List[str]:
-    prompts = [tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
-               for m in messages_batch]
-    return [p + "<think>" for p in prompts] if think else prompts
+def render_prompts(tokenizer: PreTrainedTokenizerBase, messages_batch: List[ChatMessages],
+                   think: bool) -> List[str]:
+    """Render chat messages to prompt strings, and append "<think>" when `think` is True."""
+    prompts = [tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+               for messages in messages_batch]
+    return [prompt + "<think>" for prompt in prompts] if think else prompts
 
 
-def agent_messages(model_name: str, task: str, role: str, questions: List[str]) -> List[List[dict]]:
-    """The repo's sequential LatentMAS chat messages for one role."""
+def build_agent_messages(model_name: str, task: str, role: str, questions: List[str]) -> List[ChatMessages]:
+    """Return the repo's sequential LatentMAS chat messages for one role, one list per question."""
     prompt_args = SimpleNamespace(model_name=model_name, task=task)
-    return [build_agent_message_sequential_latent_mas(role, q, method="latent_mas", args=prompt_args)
-            for q in questions]
+    return [build_agent_message_sequential_latent_mas(role, question, method="latent_mas", args=prompt_args)
+            for question in questions]
 
 
-def agent_prompts(tokenizer, model_name: str, task: str, role: str, questions: List[str], think: bool):
-    """The same messages rendered with the chat template, ready to tokenize."""
-    return render_prompts(tokenizer, agent_messages(model_name, task, role, questions), think)
+def build_agent_prompts(tokenizer: PreTrainedTokenizerBase, model_name: str, task: str, role: str,
+                        questions: List[str], think: bool) -> List[str]:
+    """Return one role's messages rendered with the chat template, ready to tokenize."""
+    return render_prompts(tokenizer, build_agent_messages(model_name, task, role, questions), think)
 
 
 # --------------------------------------------------------------------------- latent agents
 
 
 @torch.no_grad()
-def run_latent_agent(model, tokenizer, memory: SharedMemory, prompts: List[str], *,
-                     agent: str, latent_steps: int, mapping,
-                     should_stop: Optional[StopRule] = None) -> dict:
-    """One latent agent: read its prompt, then think for up to `latent_steps` steps.
+def run_latent_agent(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, memory: SharedMemory,
+                     prompts: List[str], *, agent: str, latent_steps: int, mapping: LatentMapping,
+                     should_stop: Optional[StopRule] = None) -> Dict[str, Any]:
+    """Run one latent agent: it reads its prompt, then takes up to `latent_steps` latent steps.
 
-    Rows that `should_stop` marks as done keep running (to keep the batch aligned),
-    but their extra steps are masked out, so later agents never see them.
-    Returns per-row stats: steps used and the latent vectors fed back.
+    Rows that `should_stop` marks as done keep running, because the batch must stay aligned.
+    The mask hides their extra steps, so later agents never see those steps.
+    The function returns the steps used per row and the latent vectors that it fed back.
     """
     input_ids, input_mask = tokenize_left_padded(tokenizer, prompts, model.device)
     start = memory.length
@@ -204,14 +228,14 @@ def run_latent_agent(model, tokenizer, memory: SharedMemory, prompts: List[str],
     memory.segments.append(Segment(agent, "prompt", start, memory.length))
 
     batch_size = input_ids.shape[0]
-    hidden = outputs.hidden_states[-1][:, -1]
-    active = torch.ones(batch_size, dtype=torch.long, device=model.device)
+    hidden = outputs.hidden_states[-1][:, -1]  # [batch, hidden_dim]
+    active = torch.ones(batch_size, dtype=torch.long, device=model.device)  # [batch]. 1 = still thinking.
     steps_used = torch.zeros(batch_size, dtype=torch.long, device=model.device)
     latent_vectors = []
 
     start = memory.length
     for step in range(latent_steps):
-        embedding = mapping(hidden)
+        embedding = mapping(hidden)  # [batch, hidden_dim]
         latent_vectors.append(embedding)
         outputs = append_to_memory(model, memory, active.unsqueeze(1), inputs_embeds=embedding.unsqueeze(1))
         steps_used += active
@@ -227,39 +251,58 @@ def run_latent_agent(model, tokenizer, memory: SharedMemory, prompts: List[str],
     return {"steps_used": steps_used.tolist(), "latent_vectors": latent_vectors}
 
 
-def build_latent_memory(model, tokenizer, questions: List[str], *, model_name: str, task: str,
-                        latent_steps: int, mapping, think: bool = False,
-                        should_stop: Optional[StopRule] = None):
-    """Run Planner, Critic and Refiner in latent space. Returns (memory, per-agent stats)."""
+def repeat_for_each_agent(value: PerAgentValue) -> Dict[str, PerAgentValue]:
+    """Return {agent: value} for the three latent agents, for callers that treat all agents alike."""
+    return {agent: value for agent in LATENT_AGENTS}
+
+
+def build_memory_per_agent(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, questions: List[str], *,
+                           model_name: str, task: str, latent_steps: int, mappings: Dict[str, LatentMapping],
+                           think: bool = False, stop_rules: Optional[Dict[str, Optional[StopRule]]] = None
+                           ) -> Tuple[SharedMemory, AgentStats]:
+    """Run Planner, Critic and Refiner, each with its own mapping and stop rule, and return (memory, stats)."""
+    stop_rules = stop_rules or {}
     memory = SharedMemory.empty(len(questions), model.device)
     stats = {}
     for role in LATENT_AGENTS:
-        prompts = agent_prompts(tokenizer, model_name, task, role, questions, think)
-        stats[role] = run_latent_agent(model, tokenizer, memory, prompts, agent=role,
-                                       latent_steps=latent_steps, mapping=mapping, should_stop=should_stop)
+        prompts = build_agent_prompts(tokenizer, model_name, task, role, questions, think)
+        stats[role] = run_latent_agent(model, tokenizer, memory, prompts, agent=role, latent_steps=latent_steps,
+                                       mapping=mappings[role], should_stop=stop_rules.get(role))
     return memory, stats
+
+
+def build_latent_memory(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, questions: List[str], *,
+                        model_name: str, task: str, latent_steps: int, mapping: LatentMapping,
+                        think: bool = False, should_stop: Optional[StopRule] = None
+                        ) -> Tuple[SharedMemory, AgentStats]:
+    """Run Planner, Critic and Refiner with one shared mapping and stop rule, and return (memory, stats)."""
+    return build_memory_per_agent(model, tokenizer, questions, model_name=model_name, task=task,
+                                  latent_steps=latent_steps, mappings=repeat_for_each_agent(mapping),
+                                  think=think, stop_rules=repeat_for_each_agent(should_stop))
 
 
 # --------------------------------------------------------------------------- text generation
 
 
 def sample_next_token(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+    """Return one token id per row from [batch, vocab] logits, by greedy or top-p (nucleus) sampling."""
     if temperature <= 0:
         return logits.argmax(dim=-1)
     probs = torch.softmax(logits.float() / temperature, dim=-1)
     sorted_probs, sorted_ids = probs.sort(dim=-1, descending=True)
     outside_top_p = sorted_probs.cumsum(dim=-1) - sorted_probs > top_p
     sorted_probs[outside_top_p] = 0
-    choice = torch.multinomial(sorted_probs / sorted_probs.sum(dim=-1, keepdim=True), 1)
+    choice = torch.multinomial(sorted_probs / sorted_probs.sum(dim=-1, keepdim=True), 1)  # [batch, 1]
     return sorted_ids.gather(-1, choice).squeeze(-1)
 
 
 @torch.no_grad()
-def generate_text(model, tokenizer, prompts: List[str], memory: Optional[SharedMemory] = None, *,
-                  max_new_tokens: int = 512, temperature: float = 0.6, top_p: float = 0.95) -> List[str]:
-    """Decode an answer for each prompt on top of `memory` (None = no memory at all).
+def generate_text(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, prompts: List[str],
+                  memory: Optional[SharedMemory] = None, *, max_new_tokens: int = 512,
+                  temperature: float = 0.6, top_p: float = 0.95) -> List[str]:
+    """Decode an answer for each prompt on top of `memory`. None means no memory at all.
 
-    The memory is copied first, so the same memory can be reused for another call.
+    The function copies the memory first, so a caller can reuse the same memory for another call.
     """
     batch_size = len(prompts)
     memory = memory.copy() if memory is not None else SharedMemory.empty(batch_size, model.device)
@@ -277,11 +320,21 @@ def generate_text(model, tokenizer, prompts: List[str], memory: Optional[SharedM
         finished |= next_tokens == tokenizer.eos_token_id
         if finished.all():
             break
-        still_writing = (~finished).long().unsqueeze(1)
+        # Finished rows stay in the batch, and a 0 in the mask hides their new columns.
+        still_writing = (~finished).long().unsqueeze(1)  # [batch, 1]
         outputs = append_to_memory(model, memory, still_writing, input_ids=next_tokens.unsqueeze(1))
 
     return [tokenizer.decode(ids, skip_special_tokens=True).strip() for ids in generated]
 
 
-def judger_prompts(tokenizer, model_name: str, task: str, questions: List[str], think: bool) -> List[str]:
-    return agent_prompts(tokenizer, model_name, task, "judger", questions, think)
+def generate_with_args(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, prompts: List[str],
+                       memory: Optional[SharedMemory], args: argparse.Namespace) -> List[str]:
+    """Call generate_text with the sampling settings from the common command-line flags."""
+    return generate_text(model, tokenizer, prompts, memory, max_new_tokens=args.max_new_tokens,
+                         temperature=args.temperature, top_p=args.top_p)
+
+
+def build_judger_prompts(tokenizer: PreTrainedTokenizerBase, model_name: str, task: str, questions: List[str],
+                         think: bool) -> List[str]:
+    """Return the Judger's rendered prompts, one per question."""
+    return build_agent_prompts(tokenizer, model_name, task, "judger", questions, think)

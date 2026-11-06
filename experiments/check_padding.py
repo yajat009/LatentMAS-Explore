@@ -14,14 +14,14 @@ import torch
 
 from experiments.eval_utils import add_common_arguments, load_items
 from experiments.latent_mapping import build_mapping
-from experiments.latent_pipeline import (append_to_memory, build_latent_memory, judger_prompts,
+from experiments.latent_pipeline import (append_to_memory, build_latent_memory, build_judger_prompts,
                                          load_model, tokenize_left_padded)
 
 
 def judger_first_token_logits(model, tokenizer, questions, args, mapping):
     memory, _ = build_latent_memory(model, tokenizer, questions, model_name=args.model_name, task=args.task,
                                     latent_steps=args.latent_steps, mapping=mapping, think=args.think)
-    prompts = judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
+    prompts = build_judger_prompts(tokenizer, args.model_name, args.task, questions, args.think)
     input_ids, input_mask = tokenize_left_padded(tokenizer, prompts, model.device)
     outputs = append_to_memory(model, memory, input_mask, input_ids=input_ids)
     return outputs.logits[:, -1].float()
