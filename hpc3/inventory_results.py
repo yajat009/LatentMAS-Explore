@@ -57,6 +57,17 @@ PAPER_TABLE = {  # (model, task, layout) -> (Single, TextMAS, LatentMAS), from a
 METHOD_COLUMN = {"baseline": 0, "text_mas": 1, "latent_mas": 2}
 RESULT_LINE = re.compile(r"\| OK=(True|False)\s*$", re.MULTILINE)  # gold code can span lines
 HEADER_LINE = re.compile(r"^  (\w+): (.*)$", re.MULTILINE)
+LATENT_STEPS_MARKER = re.compile(r"^\[Latent Steps\]\s*\n\s*(\d+)", re.MULTILINE)
+# Older logs have no argument header. Their settings are in the file name instead.
+ARM_NAME = re.compile(r"(?P<method>baseline|text_mas|latent_mas)_(?P<model>Qwen3-\d+B)_(?P<task>\w+?)_"
+                      r"(?P<layout>sequential|hierarchical)_ls(?P<steps>\d+)_bs(?P<batch>\d+)_think(?P<think>[01])"
+                      r"(?P<realign>_realign)?")
+
+
+def settings_from_name(path: Path) -> dict:
+    """Return the run settings encoded in a file name, or an empty dict if it has none."""
+    match = ARM_NAME.search(path.name)
+    return match.groupdict() if match else {}
 
 
 def paper_value(model: str, task: str, layout: str, method: str):
@@ -71,6 +82,19 @@ def read_run_log(path: Path):
     if "Result: " not in text and '"accuracy"' not in text:
         return None
     header = dict(HEADER_LINE.findall(text.split("Question 0")[0]))
+    named = settings_from_name(path)
+    if named:  # An argument header, when present, wins over the file name.
+        header.setdefault("method", named["method"])
+        header.setdefault("model_name", "Qwen/" + named["model"])
+        header.setdefault("task", named["task"])
+        header.setdefault("prompt", named["layout"])
+        header.setdefault("latent_steps", named["steps"])
+        header.setdefault("generate_bs", named["batch"])
+        header.setdefault("think", "True" if named["think"] == "1" else "False")
+        header.setdefault("latent_space_realign", str(bool(named["realign"])))
+    marker = LATENT_STEPS_MARKER.search(text)
+    if marker:
+        header.setdefault("latent_steps", marker.group(1))
     outcomes = RESULT_LINE.findall(text)
     summary = None
     for line in reversed(text.strip().splitlines()):
@@ -88,7 +112,7 @@ def read_run_log(path: Path):
     steps = header.get("latent_steps", "0 (default)" if method == "latent_mas" else "-")
     batch = header.get("generate_bs", "20 (default)")
     realign = header.get("latent_space_realign", "False")
-    n_done = len(outcomes)
+    n_done = summary["max_samples"] if summary and summary.get("max_samples", -1) > 0 else len(outcomes)
     accuracy = summary["accuracy"] * 100 if summary else (100 * outcomes.count("True") / n_done if n_done else None)
 
     warnings = []
@@ -113,6 +137,7 @@ def read_run_log(path: Path):
 def read_experiment_jsonl(path: Path):
     """One row per condition in an experiments/ results file."""
     by_condition = {}
+    named = settings_from_name(path)
     for line in path.read_text().splitlines():
         if not line.strip():
             continue
@@ -122,9 +147,14 @@ def read_experiment_jsonl(path: Path):
     for condition, rs in by_condition.items():
         scored = [r for r in rs if r.get("correct") is not None]
         lps = [r["gold_logprob"] for r in rs if isinstance(r.get("gold_logprob"), (int, float))]
-        rows.append({"file": str(path), "kind": "experiments", "method": condition,
-                     "model": rs[0].get("model", "?"), "task": rs[0].get("task", "?"), "layout": "sequential",
-                     "latent_steps": "-", "realign": "-", "generate_bs": "-", "think": "-", "n": len(rs),
+        rows.append({"file": str(path), "kind": "checkpoint" if named else "experiments",
+                     "method": named.get("method", condition),
+                     "model": named.get("model", rs[0].get("model", "?")),
+                     "task": named.get("task", rs[0].get("task", "?")),
+                     "layout": named.get("layout", "sequential"),
+                     "latent_steps": named.get("steps", "-"),
+                     "realign": str(bool(named.get("realign"))) if named else "-",
+                     "generate_bs": named.get("batch", "-"), "think": named.get("think", "-"), "n": len(rs),
                      "accuracy": round(100 * sum(bool(r["correct"]) for r in scored) / len(scored), 1) if scored else None,
                      "paper": None, "gap": None,
                      "warnings": f"mean log p(gold) {sum(lps) / len(lps):.3f}" if lps else ""})
@@ -141,7 +171,8 @@ def main() -> None:
     rows, other = [], []
     skip = {".git", "__pycache__", "data", ".cache", "hf_cache"}
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or any(part in skip for part in path.parts):
+        # Check only the part below root: the home folder itself is under /data on HPC3.
+        if not path.is_file() or any(part in skip for part in path.relative_to(root).parts):
             continue
         try:
             if path.suffix in {".out", ".log", ".txt", ".err"} and path.stat().st_size < 500_000_000:

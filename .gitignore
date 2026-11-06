@@ -34,3 +34,5 @@ yajat/results/*
 /data.py
 /utils.py
 /methods
+results/
+logs/

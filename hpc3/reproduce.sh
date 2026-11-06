@@ -38,11 +38,11 @@ finished() { [ -f "$1" ] && tail -n 3 "$1" | grep -q '"accuracy"'; }
 launch() {  # $1 = log file, rest = run.py arguments
     local log=$1; shift
     if finished "$log"; then echo "skip (done): $log"; return; fi
-    local cmd="python -u run.py $* --max_samples $MAX_SAMPLES --max_new_tokens $MAX_NEW"
+    local cmd="python -u run.py $* --max_samples $MAX_SAMPLES --max_new_tokens $MAX_NEW --checkpoint ${log%.log}.ckpt.jsonl"
     case $MODE in
         list)   echo "$cmd > $log" ;;
-        submit) sbatch $SBATCH_ARGS -J "$(basename "$log" .log)" -o "logs/%x.%j.out" --wrap "$cmd > $log 2>&1" ;;
-        *)      echo "=== $log"; $cmd > "$log" 2>&1 || echo "FAILED (exit $?): $log  -- see the end of the log" ;;
+        submit) sbatch $SBATCH_ARGS -J "$(basename "$log" .log)" -o "logs/%x.%j.out" --wrap "$cmd >> $log 2>&1" ;;
+        *)      echo "=== $log"; $cmd >> "$log" 2>&1 || echo "FAILED (exit $?): $log  -- see the end of the log" ;;
     esac
 }
 
