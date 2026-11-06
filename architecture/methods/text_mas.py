@@ -1,13 +1,19 @@
+"""Run the agents in sequence with text messages, which is the text baseline for LatentMAS.
+
+Each agent writes text. The next agent reads that text in its prompt. The Judger writes the final answer.
+"""
+
 from typing import Dict, List
 
 from . import default_agents
 from models import ModelWrapper
-# from prompts import build_agent_messages, build_agent_messages_v6, build_agent_messages_v6_text_mas
 from prompts import build_agent_messages_hierarchical_text_mas, build_agent_messages_sequential_text_mas
 from utils import extract_gsm8k_answer, normalize_answer, extract_markdown_python_block, run_with_timeout
 import argparse
 
 class TextMASMethod:
+    """Pass text from agent to agent and score the Judger's answer."""
+
     def __init__(
         self,
         model: ModelWrapper,
@@ -30,6 +36,7 @@ class TextMASMethod:
         self.task = args.task
         
     def run_batch(self, items: List[Dict]) -> List[Dict]:
+        """Run all agents on a batch and return one scored result dict per item."""
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
 
@@ -122,7 +129,6 @@ class TextMASMethod:
                         "output": text_out,
                     }
                 )
-            # import pdb; pdb.set_trace()
 
         results: List[Dict] = []
         for idx, item in enumerate(items):
@@ -176,4 +182,5 @@ class TextMASMethod:
         return results
 
     def run_item(self, item: Dict) -> Dict:
+        """Return the scored result for one item."""
         return self.run_batch([item])[0]

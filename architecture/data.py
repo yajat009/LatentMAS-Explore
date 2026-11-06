@@ -1,3 +1,9 @@
+"""Load the benchmark datasets into one item format, so that every method can read every task.
+
+Each loader yields dicts with the keys "question", "solution" and "gold".
+"gold" is the normalized answer. For code tasks, "gold" is the test code.
+"""
+
 from typing import Dict, Iterable, Optional
 
 from datasets import load_dataset
@@ -6,6 +12,7 @@ from utils import extract_gold, normalize_answer
 
 
 def load_gsm8k(split: str = "test", cache_dir: Optional[str] = None) -> Iterable[Dict]:
+    """Yield GSM8K items. The gold answer is the number after "####" in the solution."""
     ds = load_dataset("openai/gsm8k", "main", split=split, cache_dir=cache_dir)
     for item in ds:
         question = item["question"].strip()
@@ -19,6 +26,7 @@ def load_gsm8k(split: str = "test", cache_dir: Optional[str] = None) -> Iterable
 
 
 def load_aime2025(split: str = "train", cache_dir: Optional[str] = None) -> Iterable[Dict]:
+    """Yield AIME 2025 items."""
     ds = load_dataset("yentinglin/aime_2025", split=split, cache_dir=cache_dir)
     for item in ds:
         problem = item["problem"].strip()
@@ -32,6 +40,7 @@ def load_aime2025(split: str = "train", cache_dir: Optional[str] = None) -> Iter
 
 
 def load_aime2024(split: str = "train", cache_dir: Optional[str] = None) -> Iterable[Dict]:
+    """Yield AIME 2024 items."""
     ds = load_dataset("HuggingFaceH4/aime_2024", split=split, cache_dir=cache_dir)
     for item in ds:
         problem = item["problem"].strip()
@@ -45,6 +54,7 @@ def load_aime2024(split: str = "train", cache_dir: Optional[str] = None) -> Iter
 
 
 def load_gpqa_diamond(split: str = "test", cache_dir: Optional[str] = None) -> Iterable[Dict]:
+    """Yield GPQA-Diamond items."""
     ds = load_dataset("fingertap/GPQA-Diamond", split=split, cache_dir=cache_dir)
     for item in ds:
         question = item["question"].strip()
@@ -58,6 +68,7 @@ def load_gpqa_diamond(split: str = "test", cache_dir: Optional[str] = None) -> I
 
 
 def load_arc_easy(split: str = "test", cache_dir: Optional[str] = None) -> Iterable[Dict]:
+    """Yield ARC-Easy items, with the choices written into the question and labels mapped to lower-case letters."""
     ds = load_dataset("allenai/ai2_arc", "ARC-Easy", split=split, cache_dir=cache_dir)
     for item in ds:
         stem = item["question"].strip()
@@ -67,12 +78,12 @@ def load_arc_easy(split: str = "test", cache_dir: Optional[str] = None) -> Itera
         label_map = {"1": "a", "2": "b", "3": "c", "4": "d"}
 
         def map_label(l: str) -> str:
+            """Return the lower-case letter for a label. Some ARC items use the labels 1 to 4."""
             s = str(l).strip()
             if s in label_map:
                 return label_map[s]
             return s.lower()
 
-        # Map choices
         formatted_choices = {}
         mapped_order = []
         for label, text in zip(labels, texts):
@@ -83,7 +94,6 @@ def load_arc_easy(split: str = "test", cache_dir: Optional[str] = None) -> Itera
         ordered_lines = [f"{lab}: {formatted_choices[lab]}" for lab in mapped_order]
         question = stem + "\n" + "\n".join(ordered_lines)
 
-        # Map answers
         raw_answer = item.get("answerKey", "").strip()
         mapped_answer = map_label(raw_answer) if raw_answer else ""
         gold = normalize_answer(mapped_answer)
@@ -95,6 +105,7 @@ def load_arc_easy(split: str = "test", cache_dir: Optional[str] = None) -> Itera
 
 
 def load_arc_challenge(split: str = "test", cache_dir: Optional[str] = None) -> Iterable[Dict]:
+    """Yield ARC-Challenge items, with the choices written into the question and labels mapped to lower-case letters."""
     ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split=split, cache_dir=cache_dir)
     for item in ds:
         stem = item["question"].strip()
@@ -104,6 +115,7 @@ def load_arc_challenge(split: str = "test", cache_dir: Optional[str] = None) -> 
         label_map = {"1": "a", "2": "b", "3": "c", "4": "d"}
 
         def map_label(l: str) -> str:
+            """Return the lower-case letter for a label. Some ARC items use the labels 1 to 4."""
             s = str(l).strip()
             if s in label_map:
                 return label_map[s]
@@ -134,6 +146,7 @@ def load_winogrande(
     subset: str = "winogrande_debiased",
     cache_dir: Optional[str] = None,
 ) -> Iterable[Dict]:
+    """Yield WinoGrande items, with both options written into the question."""
     ds = load_dataset("allenai/winogrande", subset, split=split, cache_dir=cache_dir)
     for item in ds:
         ask_str = 'Pickout proper choice that fits the _ in the following sentence:'
@@ -155,6 +168,7 @@ def load_mbppplus(
     subset: str = None,
     cache_dir: Optional[str] = None,
 ) -> Iterable[Dict]:
+    """Yield MBPP+ items. The question shows three asserts, and "gold" holds the full hidden test code."""
     ds = load_dataset("evalplus/mbppplus", subset, split=split, cache_dir=cache_dir)
     for item in ds:
         question = f"""Please provide a self-contained Python script that solves the following problem in a markdown code block:\n```python\nYOUR_PYTHON_CODE\n```:
@@ -179,6 +193,7 @@ def load_humanevalplus(
     subset: str = None,
     cache_dir: Optional[str] = None,
 ) -> Iterable[Dict]:
+    """Yield HumanEval+ items. "gold" holds the test code, with a call to check() on the entry point."""
     ds = load_dataset("evalplus/humanevalplus", subset, split=split, cache_dir=cache_dir)
     for item in ds:
         question = f"""Please provide a self-contained Python script that solves the following problem in a markdown code block:\n```python\nYOUR_PYTHON_CODE\n```:
@@ -195,11 +210,9 @@ def load_humanevalplus(
         }
 
 
-# qa data from https://github.com/lupantech/AgentFlow/tree/main
-from typing import Iterable, Dict, Optional
-from datasets import load_dataset
-
+# The MedQA data comes from https://github.com/lupantech/AgentFlow/tree/main.
 def load_medqa(split=None, subset=None, cache_dir=None):
+    """Yield MedQA items from data/medqa.json. The file path is relative, so run from the repo root."""
 
     ds = load_dataset("json", data_files="./data/medqa.json", split='train')
     for item in ds:
@@ -208,6 +221,8 @@ def load_medqa(split=None, subset=None, cache_dir=None):
 
         choice_map = {"0":"A", "1":"B", "2":"C", "3":"D"}
 
+        # Assumption: raw_answer is a substring of exactly one option.
+        # TODO: If no option matches, `answer` keeps its value from the previous item.
         for idx, op in enumerate(item['options']):
             if raw_answer in op:
                 answer = choice_map[str(idx)].lower()

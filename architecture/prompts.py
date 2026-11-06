@@ -1,5 +1,10 @@
+"""Build the chat messages of every agent, so that each method sends the prompts from the paper.
+
+The text inside the prompt strings is part of the reproduction. Do not edit it.
+"""
 
 def build_agent_message_sequential_latent_mas(role: str, question: str, context: str = "", method=None, args=None):
+    """Return the LatentMAS chat messages of one role in the sequential layout (Planner, Critic, Refiner, Judger)."""
 
     system_message = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
@@ -116,6 +121,7 @@ Now, reason step by step and output the final answer inside \\boxed{{YOUR_FINAL_
 
 
 def build_agent_message_hierarchical_latent_mas(role: str, question: str, context: str = "", method=None, args=None):
+    """Return the LatentMAS chat messages of one role in the hierarchical layout (domain agents and a summarizer)."""
 
     system_message = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
@@ -339,13 +345,15 @@ Your response:
 
 
 def build_agent_messages_sequential_text_mas(role: str, question: str, context: str = "", method=None, args=None):
+    """Return the TextMAS chat messages of one role in the sequential layout, with earlier agents' text as context."""
 
     system_message = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
     assert method in ["text_mas"], "only for text_mas method"
     assert "qwen" in args.model_name.lower(), "only for qwen models"
 
-    # truncate context if needed
+    # Assumption: a positive --text_mas_context_length sets the limit.
+    # TODO: The default of -1 is not "no limit". It drops the last character of the context.
     ctx = context[: args.text_mas_context_length]
 
     if role == "planner":
@@ -509,6 +517,7 @@ Now, reason step by step and present your final answer clearly at the end.
 
 
 def build_agent_messages_hierarchical_text_mas(role: str, question: str, context: str = "", method=None, args=None):
+    """Return the TextMAS chat messages of one role in the hierarchical layout, with earlier agents' text as context."""
 
     system_message = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
     
@@ -692,6 +701,7 @@ Your response:
 
 
 def build_agent_messages_single_agent(question: str, args=None):
+    """Return the chat messages of the single-agent baseline."""
 
     system_message = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 

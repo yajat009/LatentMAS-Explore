@@ -1,3 +1,5 @@
+"""Run a single agent on each question, which is the baseline that the multi-agent methods must beat."""
+
 from typing import Dict, List
 
 from models import ModelWrapper
@@ -6,6 +8,8 @@ from utils import extract_gsm8k_answer, normalize_answer, extract_markdown_pytho
 
 
 class BaselineMethod:
+    """Answer each question with one model call and score the answer."""
+
     def __init__(
         self,
         model: ModelWrapper,
@@ -28,6 +32,7 @@ class BaselineMethod:
         self.task = args.task
 
     def run_batch(self, items: List[Dict]) -> List[Dict]:
+        """Generate one answer per item and return one scored result dict per item."""
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
         batch_messages = [
@@ -73,7 +78,6 @@ class BaselineMethod:
                 print(f'=========================================')
                 print(f'Question {idx}')
                 print(f'error_msg: {error_msg}')
-                # print(f'=========================================')
 
             elif self.task in ["aime2024", "aime2025"]:
                 pred = normalize_answer(extract_gsm8k_answer(generated_text))
@@ -117,4 +121,5 @@ class BaselineMethod:
         return results
 
     def run_item(self, item: Dict) -> Dict:
+        """Return the scored result for one item."""
         return self.run_batch([item])[0]

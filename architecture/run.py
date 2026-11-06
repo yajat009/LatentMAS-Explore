@@ -1,3 +1,9 @@
+"""Run one method on one dataset and print per-problem traces and a final JSON summary.
+
+This is the entry point of the released code. It reproduces the paper's Single, TextMAS and
+LatentMAS numbers. With --checkpoint, a preempted run resumes where it stopped.
+"""
+
 import argparse
 import io
 import json
@@ -26,6 +32,7 @@ import time
 
 
 def evaluate(preds: List[Dict]) -> Tuple[float, int]:
+    """Return (accuracy, number correct) over all predictions."""
     total = len(preds)
     correct = sum(1 for p in preds if p.get("correct", False))
     acc = correct / total if total > 0 else 0.0
@@ -33,13 +40,12 @@ def evaluate(preds: List[Dict]) -> Tuple[float, int]:
 
 
 def load_checkpoint(path):
-    """Restore results from a previous, preempted run of the same config.
+    """Return (records, elapsed seconds) from an earlier preempted run of the same configuration.
 
-    free-* partitions preempt, and this script otherwise persists nothing until
-    its final line, so a kill at problem 195/378 discards every one of them.
-    Records are appended one JSON object per line after each batch; a hard kill
-    can truncate the last line, which is why a decode error stops the replay
-    instead of raising.
+    Slurm preempts jobs on free-* partitions. Without a checkpoint, this script saves nothing
+    until its final line, so a kill at problem 195 of 378 loses all 195 problems.
+    process_batch appends one JSON object per line after each batch. A hard kill can truncate
+    the last line, so a decode error ends the replay and does not raise.
     """
     if not path or not os.path.exists(path):
         return [], 0.0
@@ -59,7 +65,6 @@ def load_checkpoint(path):
     return done, prior_elapsed
 
 
-# Main processing function for each batch
 def process_batch(
     method,
     batch: List[Dict],
@@ -69,6 +74,7 @@ def process_batch(
     max_samples: int,
     args: argparse.Namespace,
 ) -> Tuple[int, List[Dict]]:
+    """Run one batch, print its traces, append it to the checkpoint, and return (processed, preds)."""
     remaining = max_samples - processed
     if remaining <= 0:
         return processed, preds
@@ -107,8 +113,8 @@ def process_batch(
 
     processed += len(results)
     if getattr(args, "checkpoint", None):
-        # Append after the batch, not per problem: a batch is the unit the model
-        # actually completes, so it is the only boundary resume can land on.
+        # The code appends after the batch and not per problem. The model completes whole
+        # batches, so a batch end is the only point where a resume can start.
         with io.open(args.checkpoint, "a", encoding="utf-8") as fh:
             for offset, res in enumerate(results):
                 rec = dict(res)
@@ -123,9 +129,10 @@ def process_batch(
 
 
 def main():
+    """Parse the flags, build the model and the method, run all problems and print the summary."""
     parser = argparse.ArgumentParser()
 
-    # core args for experiments
+    # Core arguments for experiments.
     parser.add_argument("--method", choices=["baseline", "text_mas", "latent_mas"], required=True,
                         help="Which multi-agent method to run: 'baseline', 'text_mas', or 'latent_mas'.")
     parser.add_argument("--model_name", type=str, required=True,
@@ -136,7 +143,7 @@ def main():
                         help="Dataset/task to evaluate. Controls which loader is used.")
     parser.add_argument("--prompt", type=str, choices=["sequential", "hierarchical"], default="sequential", help="Multi-agent system architecture: 'sequential' or 'hierarchical'.")
 
-    # other args
+    # Other arguments.
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--max_new_tokens", type=int, default=4096)
@@ -156,15 +163,14 @@ def main():
                              "(3) the corrected generation slice, which right padding made "
                              "position-dependent. OFF by default: right padding is what the "
                              "authors ran, so the unfixed path is the reproduction path.")
-    # Ablations from the paper. methods/latent_mas.py has always read these via
-    # getattr(args, ..., False), but run.py never defined them, so they were
-    # unreachable -- permanently False on every run ever made with this repo.
-    #   --sequential_info_only : after each agent, keep only the KV that agent
-    #       added and drop everything earlier, so the channel carries one hop
-    #       instead of the full accumulated history.
-    #   --latent_only          : keep only the `latent_steps` silent-thought
-    #       entries, dropping the agent's own prompt KV as well. Implies
-    #       --sequential_info_only (methods/latent_mas.py:46).
+    # Ablations from the paper. methods/latent_mas.py always read these flags through
+    # getattr(args, ..., False). run.py did not define them in the past, so they were False
+    # on every earlier run.
+    #   --sequential_info_only: after each agent, keep only the KV that this agent added.
+    #       The channel then carries one hop and not the full history.
+    #   --latent_only: keep only the `latent_steps` latent entries, and also drop the agent's
+    #       own prompt KV. This flag implies --sequential_info_only
+    #       (see LatentMASMethod.__init__ in methods/latent_mas.py).
     parser.add_argument("--sequential_info_only", action="store_true",
                         help="Ablation: carry only the most recent agent's KV forward, not the accumulation.")
     parser.add_argument("--latent_only", action="store_true",
@@ -174,7 +180,7 @@ def main():
                         help="JSONL file of completed problems. Written after every batch and "
                              "replayed on startup, so a preempted run resumes instead of restarting.")
 
-    # vLLM support
+    # vLLM support.
     parser.add_argument("--use_vllm", action="store_true", help="Use vLLM backend for generation")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching in vLLM for latent_mas")
     parser.add_argument("--use_second_HF_model", action="store_true", help="Use a second HF model for latent generation in latent_mas")
@@ -202,7 +208,7 @@ def main():
         top_p=args.top_p,
     )
 
-    # method selection 
+    # Method selection.
     if args.method == "baseline":
         method = BaselineMethod(
             model,
@@ -234,7 +240,7 @@ def main():
     processed = 0
     batch: List[Dict] = []
     
-    # dataset loading
+    # Dataset loading.
     if args.task == "gsm8k":
         dataset_iter = load_gsm8k(split=args.split)
     elif args.task == "aime2024":
@@ -261,8 +267,8 @@ def main():
         args.max_samples = len(dataset_iter)
 
     if done:
-        # Loaders are deterministic and unshuffled, so the completed problems are
-        # exactly the first len(done) items and resume is a prefix skip.
+        # The loaders are deterministic and do not shuffle. The completed problems are therefore
+        # the first len(done) items, and a resume skips that prefix.
         dataset_iter = list(dataset_iter)[len(done):]
         preds = list(done)
         processed = len(done)
@@ -305,7 +311,7 @@ def main():
 
     acc, correct = evaluate(preds)
     
-    # Load results in JSON format
+    # hpc3/ and yajat/ scripts parse this final JSON line, so its format must not change.
     print(
         json.dumps(
             {

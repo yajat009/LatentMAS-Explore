@@ -1,3 +1,13 @@
+"""Run LatentMAS, in which agents share a KV cache (key/value cache) and do not write text.
+
+The Planner, the Critic and the Refiner each read their prompt on top of the shared cache, then
+take `latent_steps` latent steps. A latent step feeds the last-layer hidden state back as the next
+input after e = rescale(h W_a). W_a is a ridge-regression map from output to input embeddings.
+The Judger then writes the answer on top of the whole cache.
+
+With latent_steps == 0, the Judger gets no cache. The run is then a single Judger prompt.
+"""
+
 from typing import Dict, List, Optional, Tuple
 
 from . import default_agents
@@ -12,6 +22,8 @@ except ImportError:  # HF backend does not need vLLM
     SamplingParams = None
 
 class LatentMASMethod:
+    """Run the latent agents and the Judger, and score the Judger's answer."""
+
     def __init__(
         self,
         model: ModelWrapper,
@@ -49,6 +61,7 @@ class LatentMASMethod:
 
     @staticmethod
     def _slice_tensor(tensor: torch.Tensor, tokens_to_keep: int) -> torch.Tensor:
+        """Return the last `tokens_to_keep` positions of a [..., positions, head_dim] tensor."""
         if tokens_to_keep <= 0:
             return tensor[..., 0:0, :].contiguous()
         keep = min(tokens_to_keep, tensor.shape[-2])
@@ -56,21 +69,20 @@ class LatentMASMethod:
         return tensor[..., start:, :].contiguous()
 
     def _truncate_past(self, past_kv: Optional[Tuple], tokens_to_keep: int) -> Optional[Tuple]:
-        """Keep only the LAST `tokens_to_keep` KV positions.
+        """Keep only the last `tokens_to_keep` KV positions, for the ablations that drop earlier agents.
 
-        Reached only by the --sequential_info_only / --latent_only ablations.
-        Those flags were unreachable until run.py grew them, so this function had
-        never executed; the original implementation went through
-        Cache.to_legacy_cache()/from_legacy_cache(), which transformers 5.x removed
-        and which 4.57 keeps only as a deprecated shim. The modern cache exposes
-        `.layers`, each a DynamicLayer holding `.keys`/`.values` tensors shaped
-        [batch, heads, positions, head_dim], so slicing those in place works on
-        4.5x and forward. The two older shapes are kept as fallbacks.
+        Only --sequential_info_only and --latent_only reach this function.
+        run.py did not define those flags in the past, so the function never ran then.
+        The original code called Cache.to_legacy_cache() and from_legacy_cache().
+        transformers 5.x removed those methods, and 4.57 keeps them only as a deprecated shim.
+        The modern cache has `.layers`. Each layer is a DynamicLayer with `.keys` and `.values`
+        tensors of shape [batch, heads, positions, head_dim], so this code slices them in place.
+        This works on 4.5x and later. The two older cache formats remain as fallbacks.
         """
         if past_kv is None or tokens_to_keep <= 0:
             return None
 
-        # transformers >= ~4.54: Cache object with a .layers list of DynamicLayer.
+        # transformers 4.54 or later (approximately): a Cache object with a .layers list of DynamicLayer.
         layers = getattr(past_kv, "layers", None)
         if layers is not None:
             for layer in layers:
@@ -82,7 +94,7 @@ class LatentMASMethod:
                 layer.values = self._slice_tensor(values, tokens_to_keep)
             return past_kv
 
-        # transformers 4.3x-4.5x: Cache object with parallel key_cache/value_cache lists.
+        # transformers 4.3x to 4.5x: a Cache object with parallel key_cache and value_cache lists.
         key_cache = getattr(past_kv, "key_cache", None)
         value_cache = getattr(past_kv, "value_cache", None)
         if key_cache is not None and value_cache is not None:
@@ -91,7 +103,7 @@ class LatentMASMethod:
                 value_cache[i] = self._slice_tensor(value_cache[i], tokens_to_keep)
             return past_kv
 
-        # Pre-Cache legacy format: tuple of per-layer (key, value) tuples.
+        # Legacy format from before Cache: a tuple of per-layer (key, value) tuples.
         trimmed_layers = []
         for layer in past_kv:
             if isinstance(layer, tuple):
@@ -104,14 +116,14 @@ class LatentMASMethod:
 
     @torch.no_grad()
     def run_batch(self, items: List[Dict]) -> List[Dict]:
+        """Run all agents on the Hugging Face backend and return one scored result dict per item."""
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
 
         batch_size = len(items)
         past_kv: Optional[Tuple] = None
-        # Runs alongside past_kv and marks which of its positions are real. Only
-        # consulted under --pad_fix; without it generate_latent_batch keeps the
-        # original all-ones behaviour.
+        # This mask marks which positions of past_kv are real. Only --pad_fix reads it.
+        # Without that flag, generate_latent_batch keeps the original all-ones mask.
         past_mask: Optional[torch.Tensor] = None
         agent_traces: List[List[Dict]] = [[] for _ in range(batch_size)]
         final_texts = ["" for _ in range(batch_size)]
@@ -167,8 +179,7 @@ class LatentMASMethod:
                     tokens_added = new_past_len - prev_past_len
                     tokens_to_keep = self.latent_steps if self.latent_only else tokens_added
                     past_kv = self._truncate_past(past_kv, tokens_to_keep)
-                    # The mask indexes the cache, so it has to lose the same
-                    # positions the cache just lost or the two fall out of step.
+                    # The mask indexes the cache, so it must lose the same positions as the cache.
                     if past_mask is not None:
                         kept = _past_length(past_kv)
                         past_mask = past_mask[:, -kept:] if kept > 0 else None
@@ -189,6 +200,7 @@ class LatentMASMethod:
                     )
             else:
 
+                # With no latent steps the Judger gets no cache, not even the agents' prompts.
                 past_for_decoding = past_kv if self.latent_steps > 0 else None
                 past_mask_for_decoding = past_mask if self.latent_steps > 0 else None
 
@@ -251,7 +263,6 @@ class LatentMASMethod:
                 print(f'=========================================')
                 print(f'Question {idx}')
                 print(f'error_msg: {error_msg}')
-                # print(f'=========================================')
 
             elif self.task in ["aime2024", "aime2025"]:
                 pred = normalize_answer(extract_gsm8k_answer(final_text))
@@ -285,6 +296,11 @@ class LatentMASMethod:
         return results
     
     def run_batch_vllm(self, items: List[Dict]) -> List[Dict]:
+        """Run the agents on Hugging Face and the Judger on vLLM, and return one result dict per item.
+
+        vLLM cannot read a Hugging Face KV cache. The agents' latent embeddings therefore go
+        into the Judger's prompt embeddings, after the "<|im_start|>user" header.
+        """
         if len(items) > self.generate_bs:
             raise ValueError("Batch size exceeds configured generate_bs")
 
@@ -314,7 +330,6 @@ class LatentMASMethod:
             if agent.role != "judger":
                 prev_past_len = _past_length(past_kv)
 
-                # to wrap all latent thoughts from previous agents
                 if self.args.think:
                         wrapped_prompts = [f"{prompt}<think>" for prompt in prompts]
                 else: 
@@ -372,7 +387,7 @@ class LatentMASMethod:
                     )
             else:
                 
-                # A stack of [B, L_i, H]
+                # Each record has the shape [B, L_i, H]: batch, positions, hidden size.
                 past_embedding = torch.cat(embedding_record, dim=1).to(self.vllm_device)
                 
                 if self.args.think:
@@ -387,22 +402,21 @@ class LatentMASMethod:
                     add_special_tokens=False,
                 ) 
                 judger_encoded = judger_encoded["input_ids"].to(self.model.HF_device)
-                # Get current prompt embedding
+                # TODO: squeeze(0) removes the batch dimension when B is 1. The shape unpack below then fails.
                 curr_prompt_emb = self.model.embedding_layer(judger_encoded).squeeze(0).to(self.vllm_device)
                 
-                # assert Qwen model
                 assert "Qwen" in self.args.model_name or "qwen" in self.args.model_name, "latent_embedding_position is only supported for Qwen models currently."
 
-                # handle latent embedding insertion position    
+                # The latent embeddings go right after the user header, so each row needs that position.
                 len_of_left = []
                 for p in judger_prompts:
                     idx = p.find("<|im_start|>user\n")
-                    # Get the text up to and including "<|im_start|>user\n"
                     left = p[: idx + len("<|im_start|>user\n")]
                     len_of_left.append(len(self.model.tokenizer(left)['input_ids']))
                     
                 B, L, H = curr_prompt_emb.shape
-                _, Lp, H = past_embedding.shape  # assume shape consistency
+                # Assumption: past_embedding has the same hidden size as the prompt embedding.
+                _, Lp, H = past_embedding.shape
                     
                 whole_prompt_emb_list = []
                 for i in range(B):
@@ -412,21 +426,13 @@ class LatentMASMethod:
                     combined = torch.cat([left_emb, past_embedding[i], right_emb], dim=0)
                     whole_prompt_emb_list.append(combined)
 
-                # Pad back to max length if needed
+                # Rows can differ in length, and torch.stack needs equal lengths.
                 max_len = max(x.shape[0] for x in whole_prompt_emb_list)
                 whole_prompt_emb = torch.stack([
                     torch.cat([x, torch.zeros(max_len - x.shape[0], H, device=x.device)], dim=0)
                     for x in whole_prompt_emb_list
                 ])
 
-                # else:
-                    # Get full prompt embedding from cat with previous ones 
-                    # B L H B L H
-                    # whole_prompt_emb = torch.cat([past_embedding, curr_prompt_emb], dim=1)
-                
-                # pdb.set_trace()              
-                
-                # Use vLLM 
                 prompt_embeds_list = [
                     {
                         "prompt_embeds": embeds
@@ -454,6 +460,7 @@ class LatentMASMethod:
                     )
 
 
+        # TODO: This path has no scoring branches for code or AIME tasks, unlike run_batch.
         results: List[Dict] = []
         for idx, item in enumerate(items):
             final_text = final_texts[idx]
@@ -474,4 +481,5 @@ class LatentMASMethod:
         return results
 
     def run_item(self, item: Dict) -> Dict:
+        """Return the scored result for one item."""
         return self.run_batch([item])[0]

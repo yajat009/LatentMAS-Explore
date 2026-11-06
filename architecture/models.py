@@ -1,5 +1,13 @@
-import os
-import csv
+"""Wrap the language model, so that the methods can generate text and take latent steps through one interface.
+
+A latent step feeds the last-layer hidden state h back as the next input after e = rescale(h W_a).
+W_a is a ridge-regression map from output to input embeddings. The KV cache (key/value cache)
+of all agents grows on the way. The Judger then generates text on top of that cache.
+
+By default this code keeps the padding behaviour of the released code, which is the reproduction
+path. --pad_fix turns on the corrected behaviour.
+"""
+
 import torch
 from typing import Dict, List, Optional, Tuple
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -12,6 +20,7 @@ except ImportError:
 
 
 def _ensure_pad_token(tokenizer: AutoTokenizer) -> None:
+    """Give the tokenizer a pad token, because batched tokenization needs one."""
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token is not None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -20,19 +29,19 @@ def _ensure_pad_token(tokenizer: AutoTokenizer) -> None:
 
 
 def _apply_pad_fix(tokenizer: AutoTokenizer, enabled: bool) -> None:
-    """Left-pad when the pad fix is on.
+    """Set left padding when the pad fix is on, because decoder-only generation needs left padding.
 
-    Decoder-only generation must left-pad: under right padding every sequence
-    shorter than the batch max continues from a pad token instead of its own last
-    real token, and transformers emits "right-padding was detected!" on every
-    batch. Off by default -- right padding is what the authors ran, so the unfixed
-    path stays the reproduction path.
+    Under right padding, every sequence shorter than the batch maximum continues from a pad
+    token and not from its last real token. transformers then prints "right-padding was
+    detected!" on every batch. The fix is off by default. The authors ran with right padding,
+    so the unfixed path stays the reproduction path.
     """
     if enabled:
         tokenizer.padding_side = "left"
 
 
 def _past_length(past_key_values: Optional[Tuple]) -> int:
+    """Return the number of positions in the cache. Keys have the shape [batch, heads, positions, head_dim]."""
     if not past_key_values:
         return 0
     k = past_key_values[0][0]
@@ -40,20 +49,22 @@ def _past_length(past_key_values: Optional[Tuple]) -> int:
 
 
 class ModelWrapper:
+    """Hold the tokenizer and the model (Hugging Face, vLLM or both) and provide all generation calls."""
+
     def __init__(self, model_name: str, device: torch.device, use_vllm: bool = False, args = None):
         self.model_name = model_name
         self.device = device
         self.use_vllm = use_vllm and _HAS_VLLM
         self.vllm_engine = None
         self.latent_space_realign = bool(getattr(args, "latent_space_realign", False)) if args else False
-        # --pad_fix turns on all three parts of the right-padding fix together:
-        # left padding, the corrected generation slice, and real attention masks
-        # through the latent loop. Any one alone is wrong; see run.py's help.
+        # --pad_fix turns on all three parts of the right-padding fix together: left padding,
+        # the corrected generation slice, and real attention masks through the latent loop.
+        # Any one part alone is wrong. See the help text in run.py.
         self.pad_fix = bool(getattr(args, "pad_fix", False)) if args else False
         self._latent_realign_matrices: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self.args = args
 
-        # for ablation
+        # Ablation code can read the last aligned vector before rescaling from here.
         self.pre_aligned = None
 
         if self.use_vllm:
@@ -76,15 +87,13 @@ class ModelWrapper:
                 ).to(args.device2).eval() 
                 self.embedding_layer = self.HF_model.get_input_embeddings()
                 self.HF_device = args.device2
-                # if self.latent_space_realign:
                 self._ensure_latent_realign_matrix(self.HF_model, torch.device(self.HF_device), args)
             elif self.latent_space_realign:
                 raise ValueError("latent_space_realign requires --use_second_HF_model when using vLLM backend.")
             _ensure_pad_token(self.tokenizer)
             _apply_pad_fix(self.tokenizer, self.pad_fix)
-            return  # skip loading transformers model
+            return  # The vLLM path does not load a second copy on self.model.
 
-        # fallback: normal transformers path
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
         _ensure_pad_token(self.tokenizer)
         _apply_pad_fix(self.tokenizer, self.pad_fix)
@@ -103,6 +112,7 @@ class ModelWrapper:
             self._ensure_latent_realign_matrix(self.model, self.device, args)
 
     def render_chat(self, messages: List[Dict], add_generation_prompt: bool = True) -> str:
+        """Return the chat as one prompt string, with a plain layout if the tokenizer has no chat template."""
         tpl = getattr(self.tokenizer, "chat_template", None)
         if tpl:
             return self.tokenizer.apply_chat_template(
@@ -120,6 +130,7 @@ class ModelWrapper:
     def prepare_chat_input(
         self, messages: List[Dict], add_generation_prompt: bool = True
     ) -> Tuple[str, torch.Tensor, torch.Tensor, List[str]]:
+        """Return (prompt, input ids [1, seq_len], attention mask [1, seq_len], tokens) for one chat."""
         prompt_text = self.render_chat(messages, add_generation_prompt=add_generation_prompt)
         encoded = self.tokenizer(
             prompt_text,
@@ -137,6 +148,7 @@ class ModelWrapper:
         batch_messages: List[List[Dict]],
         add_generation_prompt: bool = True,
     ) -> Tuple[List[str], torch.Tensor, torch.Tensor, List[List[str]]]:
+        """Return (prompts, input ids [batch, seq_len], attention mask [batch, seq_len], tokens) for a batch."""
         prompts: List[str] = []
         for messages in batch_messages:
             prompts.append(self.render_chat(messages, add_generation_prompt=add_generation_prompt))
@@ -162,6 +174,7 @@ class ModelWrapper:
         temperature: float = 0.7,
         top_p: float = 0.95,
     ) -> List[str]:
+        """Return one generated text per prompt from the vLLM engine."""
         if not self.vllm_engine:
             raise RuntimeError("vLLM engine not initialized. Pass use_vllm=True to ModelWrapper.")
         sampling_params = SamplingParams(
@@ -174,6 +187,12 @@ class ModelWrapper:
         return generations
     
     def _build_latent_realign_matrix(self, model, device, args) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return (W_a [hidden, hidden], target norm), which map a hidden state to an input embedding.
+
+        W_a = (W_out^T W_out + lambda I)^-1 W_out^T W_in, with lambda = 1e-5.
+        The target norm is the mean norm of the input token embeddings.
+        Without --latent_space_realign, W_a is the identity and only the rescale remains.
+        """
         input_embeds = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
         output_embeds = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
         if output_embeds is None:
@@ -197,12 +216,13 @@ class ModelWrapper:
         if self.args.latent_space_realign:
             pass
         else:
-            # keep the matrix, for further normalization
+            # The identity keeps the rescale in _apply_latent_realignment and drops the realignment.
             realign_matrix = torch.eye(realign_matrix.shape[0], device=realign_matrix.device, dtype=realign_matrix.dtype)
 
         return realign_matrix, target_norm
 
     def _ensure_latent_realign_matrix(self, model, device, args) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return the cached (W_a, target norm) for this model on `device`, and build them on first use."""
         key = id(model)
         info = self._latent_realign_matrices.get(key)
         target_device = torch.device(device)
@@ -220,6 +240,7 @@ class ModelWrapper:
         return matrix, target_norm
 
     def _apply_latent_realignment(self, hidden: torch.Tensor, model: torch.nn.Module) -> torch.Tensor:
+        """Return e = rescale(h W_a), as [batch, hidden], in the dtype of `hidden`."""
         matrix, target_norm = self._ensure_latent_realign_matrix(model, hidden.device, self.args)
         hidden_fp32 = hidden.to(torch.float32)
         aligned = torch.matmul(hidden_fp32, matrix)
@@ -242,6 +263,10 @@ class ModelWrapper:
         past_key_values: Optional[Tuple] = None,
         past_attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[List[str], Optional[Tuple]]:
+        """Generate text on top of an optional cache, and return (texts, cache).
+
+        Without --pad_fix, the mask of the past cache is all ones, as in the released code.
+        """
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
         if attention_mask is None:
@@ -262,9 +287,9 @@ class ModelWrapper:
                     and past_attention_mask is not None
                     and past_attention_mask.shape[-1] == past_len
                 ):
-                    # The real mask carried out of the latent loop. torch.ones()
-                    # here re-admits every pad position sitting in the inherited
-                    # cache, which is the second half of the padding bug.
+                    # This is the real mask from the latent loop. The torch.ones() below makes every
+                    # pad position in the inherited cache visible again, which is the second
+                    # half of the padding bug.
                     past_mask = past_attention_mask.to(
                         dtype=attention_mask.dtype, device=attention_mask.device
                     )
@@ -292,12 +317,11 @@ class ModelWrapper:
         generations: List[str] = []
         for idx, length in enumerate(prompt_lengths):
             length = int(length)
-            # RIGHT padding puts the real tokens at [0, length), so generation
-            # starts at `length`. LEFT padding puts them at the END of the padded
-            # block, so generation starts after the full padded width. Applying
-            # the right-padding slice to a left-padded batch yields pad tokens
-            # plus a truncated answer -- silently, because skip_special_tokens
-            # hides the pads. This is why padding_side cannot be flipped alone.
+            # Right padding puts the real tokens at [0, length), so generation starts at `length`.
+            # Left padding puts them at the end of the padded block, so generation starts after
+            # the full padded width. The right-padding slice on a left-padded batch gives pad
+            # tokens and a truncated answer. skip_special_tokens hides the pads, so nothing
+            # warns about this. That is why padding_side cannot change alone.
             start = input_ids.shape[1] if self.pad_fix else length
             generated_ids = sequences[idx, start:]
             text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
@@ -305,6 +329,7 @@ class ModelWrapper:
         return generations, outputs.past_key_values
 
     def tokenize_text(self, text: str) -> torch.Tensor:
+        """Return the token ids of `text`, as [1, seq_len]."""
         return self.tokenizer(
             text,
             add_special_tokens=False,
@@ -321,12 +346,12 @@ class ModelWrapper:
         past_key_values: Optional[Tuple] = None,
         past_attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple:
-        """Returns (past_key_values, running_attention_mask).
+        """Run one latent agent on the Hugging Face model, and return (past_key_values, running mask).
 
-        The mask is returned so the caller can hand the NEXT agent -- and finally
-        the judger -- a mask that still marks the pad positions in the inherited
-        cache as pad. Under --pad_fix that mask is real; without it the old
-        all-ones behaviour is preserved exactly, since right padding is the
+        The agent reads its prompt on top of the cache, then takes `latent_steps` latent steps.
+        The caller passes the mask to the next agent and finally to the Judger, so that they can
+        tell which cache positions are pads. Under --pad_fix the mask is real. Without that
+        flag, the code keeps the old all-ones behaviour, because right padding is the
         reproduction path.
         """
         if input_ids.dim() != 2:
@@ -356,11 +381,10 @@ class ModelWrapper:
                     )
                 attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
 
-        # Direct model(...) calls do not derive position_ids from the mask the way
-        # generate() does -- they fall back to sequential cache positions. That is
-        # fine under right padding (real tokens start at 0) but wrong under left
-        # padding, where every padded row would be shifted by its pad width. So
-        # compute them here whenever the fix is on.
+        # A direct model(...) call does not derive position_ids from the mask, unlike generate().
+        # It uses sequential cache positions. That is correct under right padding, where real
+        # tokens start at 0. Under left padding, it shifts every padded row by its pad width.
+        # This code therefore computes the positions when the fix is on.
         position_ids = None
         if self.pad_fix:
             position_ids = (attention_mask.long().cumsum(dim=-1) - 1).clamp_min(0)
@@ -376,15 +400,17 @@ class ModelWrapper:
             return_dict=True,
         )
         past = outputs.past_key_values
-        # `attention_mask` now covers exactly the positions held in `past`.
+        # `attention_mask` now covers the positions in `past`.
         running_mask = attention_mask
 
-        # Position -1 is the LAST position of the row. Under left padding that is
-        # the real final prompt token, so the latent thought is seeded correctly.
-        # Under right padding it is a pad for every sequence shorter than the batch
-        # max -- measured at 93.3% of sequences -- which is the first half of the
-        # padding bug. Left padding is what makes this index right; that is why
-        # --pad_fix flips padding_side rather than gathering at sum(mask)-1 here.
+        # Position -1 is the last position of the row. Under left padding, that is the last real
+        # prompt token, so the first latent step starts from the right state. Under right padding,
+        # it is a pad for every sequence shorter than the batch maximum, which was 93.3% of
+        # sequences when measured. This is the first half of the padding bug. Left padding makes
+        # this index correct, so --pad_fix changes padding_side and does not gather at sum(mask)-1.
+        #
+        # Here B = batch and D = hidden size. e_t is the input embedding of the last position.
+        # TODO: e_t, h_t, e_t_plus_1 and latent_vecs_all never leave this function, and nothing uses them.
         e_t = outputs.hidden_states[0][:, -1, :]          # [B, D]
         last_hidden = outputs.hidden_states[-1][:, -1, :] # [B, D]
         h_t = last_hidden.detach().clone()
@@ -407,9 +433,9 @@ class ModelWrapper:
 
             past_len = _past_length(past)
             if self.pad_fix:
-                # Extend the REAL mask by one position for the new latent entry.
-                # torch.ones(past_len + 1) below re-admits every pad already in
-                # the cache -- 35.8% of KV positions, measured.
+                # This extends the real mask by one position for the new latent entry.
+                # The torch.ones(past_len + 1) below makes every pad in the cache visible again.
+                # Pads were 35.8% of KV positions when measured.
                 latent_mask = torch.cat(
                     [
                         running_mask,
@@ -429,7 +455,7 @@ class ModelWrapper:
                 )
             latent_pos = None
             if self.pad_fix:
-                # One new position, numbered by how many real positions precede it.
+                # The new position number is the count of real positions before it.
                 latent_pos = (latent_mask.long().cumsum(dim=-1) - 1).clamp_min(0)[:, -1:]
 
             outputs = self.model(
@@ -456,6 +482,13 @@ class ModelWrapper:
         latent_steps: int,
         past_key_values: Optional[Tuple] = None,
     ) -> Tuple:
+        """Run one latent agent on the second Hugging Face model for the vLLM path.
+
+        The function returns (past_key_values, embeddings). The embeddings have the shape
+        [batch, seq_len + latent_steps, hidden]. They hold the prompt's input embeddings and the
+        latent embeddings, because vLLM reads embeddings and cannot read a Hugging Face KV cache.
+        This path has no --pad_fix handling.
+        """
         if input_ids.dim() != 2:
             raise ValueError("input_ids must be 2D with shape [batch, seq_len]")
         if attention_mask is None:
@@ -483,7 +516,7 @@ class ModelWrapper:
         last_hidden = outputs.hidden_states[-1][:, -1, :]
         
         curr_output_embedding = [] 
-        curr_output_embedding.append(outputs.hidden_states[0])  # input embedding
+        curr_output_embedding.append(outputs.hidden_states[0])  # [batch, seq_len, hidden]
         
         
         for _ in range(latent_steps):
@@ -510,5 +543,5 @@ class ModelWrapper:
 
             curr_output_embedding.append(latent_embed.detach())
 
-        return past, torch.cat(curr_output_embedding, dim=1) # Output input embeddings
+        return past, torch.cat(curr_output_embedding, dim=1)
 
