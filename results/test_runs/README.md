@@ -23,8 +23,8 @@ python results/test_runs/analysis/recompute_result_tables.py
 | `run_adaptive_latent_steps.py` | Fixed step counts against stopping when the latent state converges | Not run on a real model |
 | `run_trimmed_memory.py` | Full memory against parts of it (Refiner only, latent steps only) | Not run on a real model |
 | `run_execution_retry.py` | Judger with and without one retry after a failed visible test | Not run on a real model |
-| `run_content_audit.py` | Judger alone, prompts only, pause tokens, swapped memory, and real memory, by log p(gold) | Pilot done: `results/08_content_audit/` |
-| `run_message_decoding.py` | Real latent vectors against swapped or paused ones, and a logit lens on every step | Pilot done: `results/08_content_audit/` |
+| `run_content_audit.py` | Judger alone, prompts only, pause tokens, swapped memory, and real memory, by log p(gold) | Pilot done: `results/details/08_content_audit/` |
+| `run_message_decoding.py` | Real latent vectors against swapped or paused ones, and a logit lens on every step | Pilot done: `results/details/08_content_audit/` |
 | `summarize_content_audit.py` | Content-audit runs across seeds: means, intervals and Holm-corrected p-values | Needs several seeds |
 
 Example commands:

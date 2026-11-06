@@ -60,4 +60,4 @@ An independent implementation (`results/test_runs/run_memory_controls.py`) was m
 ## Evidence
 
 - `latent_steps_sweep_45.json`: the sweep with `--think`
-- `../data/question_outcomes.csv`: every paired test above. Run `results/test_runs/analysis/recompute_result_tables.py`.
+- `../../data/question_outcomes.csv`: every paired test above. Run `results/test_runs/analysis/recompute_result_tables.py`.

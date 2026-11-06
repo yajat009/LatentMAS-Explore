@@ -21,4 +21,4 @@ Latent steps at this size do not show the MBPP+ drop. The cause of that differen
 
 ## Evidence
 
-- `../data/runs.csv`, `../data/question_outcomes.csv` (the `correct_numeric` column)
+- `../../data/runs.csv`, `../../data/question_outcomes.csv` (the `correct_numeric` column)

@@ -8,7 +8,7 @@ LatentMAS lets language-model agents pass internal state to each other, not text
 
 ## Main results
 
-Every number has a label and evidence in [results/](results/README.md).
+Start with the one-page summary in [results/](results/README.md).
 
 | Finding | Evidence | Label |
 |---|---|---|
@@ -26,7 +26,7 @@ Every number has a label and evidence in [results/](results/README.md).
 | Folder | What it holds |
 |---|---|
 | [architecture/](architecture/README.md) | **Part 1.** How the method works, the original Gen-Verse code, the paper's figures, and a list of every change from upstream |
-| [results/](results/README.md) | **Part 2.** Every result, labelled by how far to trust it, with its evidence. `results/test_runs/` holds the scripts that produced the results. |
+| [results/](results/README.md) | **Part 2.** One page of results. `details/` has the evidence, and `test_runs/` has the scripts. |
 
 `data/` holds the upstream MedQA dataset. It stays at the root because `architecture/data.py` reads it by that path.
 

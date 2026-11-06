@@ -38,4 +38,4 @@ No completed run used `--pad_fix`, so the fix is untested at scale. The only run
 ## Evidence
 
 - `padding_test_45.json`: the 45-question test and the contamination rates
-- `../data/question_outcomes.csv`: the paired outcomes
+- `../../data/question_outcomes.csv`: the paired outcomes

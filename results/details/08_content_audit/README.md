@@ -38,4 +38,4 @@ A logit lens reads each latent vector as token scores. On 4B, the gold answer's 
 ## Evidence
 
 - `content_audit_output_*.txt`, `message_decoding_output_*.txt`: printed output of the runs
-- `../data/content_audit_scores.csv`: per-question scores for every condition
+- `../../data/content_audit_scores.csv`: per-question scores for every condition

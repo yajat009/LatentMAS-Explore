@@ -76,8 +76,8 @@ Check these settings before you trust a run:
 |---|---|
 | `--latent_steps` | The default is 0. At 0, `latent_mas.py` passes no cache to the Judger, so the method is off. |
 | `--latent_space_realign` | Off by default, so `W_a` is the identity. Qwen3-4B has tied embeddings, so `W_a` is the identity there anyway. Qwen3-14B does not. |
-| `--generate_bs` | Above 1, the tokenizer pads on the right, and this breaks all three methods. See `results/04_padding_bug/`. Use 1, or pass `--pad_fix`. |
-| `--think` | This flag does not turn reasoning on or off. It only adds `<think>` to the end of the Judger prompt. Without it, the model writes `<think>` itself. It has a measured effect. See `results/02_latent_steps_and_think_tag/`. |
+| `--generate_bs` | Above 1, the tokenizer pads on the right, and this breaks all three methods. See `results/details/04_padding_bug/`. Use 1, or pass `--pad_fix`. |
+| `--think` | This flag does not turn reasoning on or off. It only adds `<think>` to the end of the Judger prompt. Without it, the model writes `<think>` itself. It has a measured effect. See `results/details/02_latent_steps_and_think_tag/`. |
 | `--use_vllm` | Do not use it. It mis-scores code tasks. |
 | `transformers` | Keep version 4.57.1. Version 5.x breaks `models.py:_past_length`. |
 
@@ -109,7 +109,7 @@ Files moved from the repo root into `architecture/`, and `assets/` and `example_
 
 A fix to any of these changes results, so the code keeps the upstream behavior.
 
-- GSM8K scoring compares strings, so `57.00` does not match gold `57`. See `results/07_gsm8k/`.
+- GSM8K scoring compares strings, so `57.00` does not match gold `57`. See `results/details/07_gsm8k/`.
 - The MedQA loader can reuse the previous item's answer letter (`data.py`).
 - AIME scoring catches only `ValueError`, so a missing prediction stops the run.
 - `--text_mas_context_length` defaults to -1, which drops the last character of the context.

@@ -44,4 +44,4 @@ A batch-size-1 rerun would settle this.
 ## Evidence
 
 - `scale_4b_vs_14b_45.json`: the 2 × 2 table, with jobs and caveats
-- `../data/runs.csv` and `../data/question_outcomes.csv`: every run above
+- `../../data/runs.csv` and `../../data/question_outcomes.csv`: every run above

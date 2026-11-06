@@ -58,4 +58,4 @@ The collapsed outputs repeat fragments such as "thefunction and thefunction and"
 ## Evidence
 
 - `method_comparison_full_378.json`: output of `results/test_runs/analysis/compare_methods_from_checkpoints.py`
-- `../data/runs.csv`, `../data/question_outcomes.csv`
+- `../../data/runs.csv`, `../../data/question_outcomes.csv`
