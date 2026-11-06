@@ -1,0 +1,18 @@
+condition           accuracy  mean log p(gold)  gold top-1
+judger_alone             nan            -8.940       0.420
+prompts_only             nan           -21.219       0.520
+pause                    nan           -20.518       0.505
+swapped                  nan           -18.644       0.470
+latent_identity          nan           -18.247       0.495
+latent_ridge             nan           -18.197       0.515
+latent_random            nan           -19.785       0.520
+Decomposition (X minus Y, paired on the same questions):
+part                          acc diff  wins  losses       p              logp diff [95% CI]
+agent prompts                        -     -       -       -       -12.279 [-13.196, -11.366]
+extra positions / compute            -     -       -       -         0.701 [ 0.404,  1.008]
+any real message                     -     -       -       -         1.874 [ 0.736,  3.030]
+question-specific content            -     -       -       -         0.397 [-0.757,  1.495]
+total                                -     -       -       -        -9.308 [-10.326, -8.278]
+Mean latent steps per agent: planner=20.0  critic=20.0  refiner=20.0
+Mean cos(ridge vector, identity vector): 1.0000  (about 1.0 means W_a does nothing, as expected for tied embeddings)
+Saved 1400 rows to results/raw/audit_pilot/exp5_Qwen3-4B_gsm8k_m20_seed42.jsonl

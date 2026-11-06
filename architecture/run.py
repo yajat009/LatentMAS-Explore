@@ -311,7 +311,7 @@ def main():
 
     acc, correct = evaluate(preds)
     
-    # hpc3/ and yajat/ scripts parse this final JSON line, so its format must not change.
+    # The scripts in results/test_runs/ parse this final JSON line, so its format must not change.
     print(
         json.dumps(
             {

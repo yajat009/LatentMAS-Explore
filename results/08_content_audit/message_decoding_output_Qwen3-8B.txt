@@ -1,0 +1,16 @@
+Activation patching: delta = log p(gold | real) - log p(gold | patched); > 0 means the patch hurt
+patched             mean delta                95% CI
+no_memory               -8.203   [ -9.052,  -7.287]
+swap_planner             0.001   [ -0.053,   0.060]
+pause_planner            1.024   [  0.852,   1.189]
+swap_critic              0.013   [ -0.039,   0.067]
+pause_critic             0.679   [  0.558,   0.796]
+swap_refiner            -0.016   [ -0.064,   0.030]
+pause_refiner            0.996   [  0.889,   1.104]
+swap_all                -0.008   [ -0.063,   0.048]
+Logit lens: median rank of the gold answer's first token (1 = top choice)
+  planner  step 0: 24898  step 4: 8133  step 8: 5562  step 12: 20682  step 16: 4589   | share of steps with gold in top 10: 0.000
+  critic   step 0: 92956  step 4: 13281  step 8: 14772  step 12: 13058  step 16: 14010   | share of steps with gold in top 10: 0.000
+  refiner  step 0: 93491  step 4: 13122  step 8: 21156  step 12: 14327  step 16: 13421   | share of steps with gold in top 10: 0.000
+Example (question 0, refiner, step 0) top tokens: ['<think>', 'ioned', '.$.', 'ionale', '\tInitialize', '</think>', '\tON', '.singleton', '<tool_response>', '�']
+Saved 200 rows to results/raw/audit_pilot/exp6_Qwen3-8B_gsm8k_identity_m20.jsonl
