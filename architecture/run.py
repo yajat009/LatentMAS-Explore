@@ -128,6 +128,17 @@ def process_batch(
     return processed, preds
 
 
+def select_random_subset(items: List[Dict], subset_size: int, subset_seed: int) -> List[Dict]:
+    """Return a fixed random subset of the items in dataset order, so that every method gets the same questions.
+
+    The function uses its own random generator. The global generator that seeds sampling stays untouched.
+    """
+    import random
+
+    chosen = sorted(random.Random(subset_seed).sample(range(len(items)), min(subset_size, len(items))))
+    return [items[i] for i in chosen]
+
+
 def main():
     """Parse the flags, build the model and the method, run all problems and print the summary."""
     parser = argparse.ArgumentParser()
@@ -181,6 +192,9 @@ def main():
                              "replayed on startup, so a preempted run resumes instead of restarting.")
 
     # vLLM support.
+    parser.add_argument("--subset_seed", type=int, default=None,
+                        help="Evaluate a fixed random subset of --max_samples questions, chosen with this seed. "
+                             "Off by default: without it the run takes the first --max_samples questions.")
     parser.add_argument("--use_vllm", action="store_true", help="Use vLLM backend for generation")
     parser.add_argument("--enable_prefix_caching", action="store_true", help="Enable prefix caching in vLLM for latent_mas")
     parser.add_argument("--use_second_HF_model", action="store_true", help="Use a second HF model for latent generation in latent_mas")
@@ -265,6 +279,14 @@ def main():
     if args.max_samples == -1:
         dataset_iter = list(dataset_iter)  
         args.max_samples = len(dataset_iter)
+
+    if args.subset_seed is not None and args.max_samples > 0:
+        # Opt-in. A small-budget run needs a subset, and the first questions of a test set are
+        # not representative of the whole set. A fixed seed gives every method the same questions.
+        all_items = list(dataset_iter)
+        dataset_iter = select_random_subset(all_items, args.max_samples, args.subset_seed)
+        args.max_samples = len(dataset_iter)
+        print(f"[subset] {len(dataset_iter)} of {len(all_items)} questions, subset_seed={args.subset_seed}")
 
     if done:
         # The loaders are deterministic and do not shuffle. The completed problems are therefore
