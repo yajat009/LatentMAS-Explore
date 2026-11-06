@@ -34,5 +34,6 @@ yajat/results/*
 /data.py
 /utils.py
 /methods
-results/
+results/*
+!results/REPORT.md
 logs/
