@@ -1,6 +1,6 @@
-"""Find every result already in the repo and summarize it in one table.
+"""Find every result already in the repo and summarize it in one table, so that old runs can be compared with the paper.
 
-It reads three kinds of files and never changes them:
+The script reads three kinds of files and never changes them:
 
   1. run.py logs (Slurm .out files, or saved stdout). The script reads the "  key: value"
      argument header, counts the "Result: ... | OK=True/False" lines, and reads the final
@@ -8,11 +8,14 @@ It reads three kinds of files and never changes them:
      realign flag, batch size, accuracy, number of questions, and a warning column.
   2. experiments/results/*.jsonl from the experiments/ scripts. Each (file, condition)
      becomes one row with its accuracy and mean teacher-forced log p(gold).
-  3. Anything else that looks like a result (*.json, *.csv) is listed by name only.
+  3. Other files that look like results (*.json, *.csv). The script lists these by name only.
 
-Warnings flag the known pitfalls: latent_mas with latent_steps 0 (the Judger gets no
-cache), generate_bs above 1 for latent_mas (padding leak), an old "muscle" method name,
-and logs that never reached the final summary (crashed or still running).
+Warnings flag the known pitfalls:
+
+  * latent_mas with latent_steps 0, because the Judger then gets no cache.
+  * generate_bs above 1 for latent_mas, because padding then leaks into the shared cache.
+  * The old "muscle" method name.
+  * Logs without a final summary, because the run crashed or is still running.
 
 Usage (from the repo root):
     python hpc3/inventory_results.py                 # scans the current folder
@@ -24,8 +27,12 @@ import csv
 import json
 import re
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-PAPER_TABLE = {  # (model, task, layout) -> (Single, TextMAS, LatentMAS), from assets/main_table1/2.png
+ResultRow = Dict[str, Any]
+
+# (model, task, layout) -> (Single, TextMAS, LatentMAS). The values come from assets/main_table1/2.png.
+PAPER_TABLE = {
     ("Qwen3-4B", "gsm8k", "sequential"): (82.4, 89.8, 88.2),
     ("Qwen3-4B", "mbppplus", "sequential"): (63.5, 69.8, 73.5),
     ("Qwen3-4B", "humanevalplus", "sequential"): (75.0, 79.7, 79.9),
@@ -55,34 +62,37 @@ PAPER_TABLE = {  # (model, task, layout) -> (Single, TextMAS, LatentMAS), from a
     ("Qwen3-14B", "humanevalplus", "sequential"): (76.8, 81.1, 86.5),
 }
 METHOD_COLUMN = {"baseline": 0, "text_mas": 1, "latent_mas": 2}
-RESULT_LINE = re.compile(r"\| OK=(True|False)\s*$", re.MULTILINE)  # gold code can span lines
+# The pattern matches only the end of a result line, because gold code can span several lines.
+RESULT_LINE = re.compile(r"\| OK=(True|False)\s*$", re.MULTILINE)
 HEADER_LINE = re.compile(r"^  (\w+): (.*)$", re.MULTILINE)
 LATENT_STEPS_MARKER = re.compile(r"^\[Latent Steps\]\s*\n\s*(\d+)", re.MULTILINE)
-# Older logs have no argument header. Their settings are in the file name instead.
+# Older logs have no argument header, so their settings come from the file name.
 ARM_NAME = re.compile(r"(?P<method>baseline|text_mas|latent_mas)_(?P<model>Qwen3-\d+B)_(?P<task>\w+?)_"
                       r"(?P<layout>sequential|hierarchical)_ls(?P<steps>\d+)_bs(?P<batch>\d+)_think(?P<think>[01])"
                       r"(?P<realign>_realign)?")
 
 
-def settings_from_name(path: Path) -> dict:
+def parse_settings_from_name(path: Path) -> Dict[str, Optional[str]]:
     """Return the run settings encoded in a file name, or an empty dict if it has none."""
     match = ARM_NAME.search(path.name)
     return match.groupdict() if match else {}
 
 
-def paper_value(model: str, task: str, layout: str, method: str):
+def look_up_paper_value(model: str, task: str, layout: str, method: str) -> Optional[float]:
+    """Return the paper's accuracy for a run, or None if the paper has no such entry."""
+    # The single-agent baseline has no layout, so its value is stored under "sequential".
     key = (model.split("/")[-1], task, layout if method != "baseline" else "sequential")
     row = PAPER_TABLE.get(key)
     return None if row is None or method not in METHOD_COLUMN else row[METHOD_COLUMN[method]]
 
 
-def read_run_log(path: Path):
+def read_run_log(path: Path) -> Optional[ResultRow]:
     """Return one summary row for a run.py log, or None if the file is not one."""
     text = path.read_text(errors="replace")
     if "Result: " not in text and '"accuracy"' not in text:
         return None
     header = dict(HEADER_LINE.findall(text.split("Question 0")[0]))
-    named = settings_from_name(path)
+    named = parse_settings_from_name(path)
     if named:  # An argument header, when present, wins over the file name.
         header.setdefault("method", named["method"])
         header.setdefault("model_name", "Qwen/" + named["model"])
@@ -125,7 +135,7 @@ def read_run_log(path: Path):
     if method == "muscle" or (summary and summary.get("method") == "muscle"):
         warnings.append("old code version (method 'muscle')")
 
-    paper = paper_value(model, task, layout, "latent_mas" if method == "muscle" else method)
+    paper = look_up_paper_value(model, task, layout, "latent_mas" if method == "muscle" else method)
     return {"file": str(path), "kind": "run.py", "method": method, "model": model, "task": task,
             "layout": layout, "latent_steps": steps, "realign": realign, "generate_bs": batch,
             "think": header.get("think", "?"), "n": n_done,
@@ -134,34 +144,37 @@ def read_run_log(path: Path):
             "warnings": "; ".join(warnings)}
 
 
-def read_experiment_jsonl(path: Path):
-    """One row per condition in an experiments/ results file."""
+def read_experiment_jsonl(path: Path) -> List[ResultRow]:
+    """Return one summary row per condition in a JSONL file from experiments/ or a run.py checkpoint."""
     by_condition = {}
-    named = settings_from_name(path)
+    named = parse_settings_from_name(path)
     for line in path.read_text().splitlines():
         if not line.strip():
             continue
-        r = json.loads(line)
-        by_condition.setdefault(r.get("condition", "-"), []).append(r)
+        record = json.loads(line)
+        by_condition.setdefault(record.get("condition", "-"), []).append(record)
     rows = []
-    for condition, rs in by_condition.items():
-        scored = [r for r in rs if r.get("correct") is not None]
-        lps = [r["gold_logprob"] for r in rs if isinstance(r.get("gold_logprob"), (int, float))]
+    for condition, records in by_condition.items():
+        scored = [record for record in records if record.get("correct") is not None]
+        logprobs = [record["gold_logprob"] for record in records
+                    if isinstance(record.get("gold_logprob"), (int, float))]
         rows.append({"file": str(path), "kind": "checkpoint" if named else "experiments",
                      "method": named.get("method", condition),
-                     "model": named.get("model", rs[0].get("model", "?")),
-                     "task": named.get("task", rs[0].get("task", "?")),
+                     "model": named.get("model", records[0].get("model", "?")),
+                     "task": named.get("task", records[0].get("task", "?")),
                      "layout": named.get("layout", "sequential"),
                      "latent_steps": named.get("steps", "-"),
                      "realign": str(bool(named.get("realign"))) if named else "-",
-                     "generate_bs": named.get("batch", "-"), "think": named.get("think", "-"), "n": len(rs),
-                     "accuracy": round(100 * sum(bool(r["correct"]) for r in scored) / len(scored), 1) if scored else None,
+                     "generate_bs": named.get("batch", "-"), "think": named.get("think", "-"), "n": len(records),
+                     "accuracy": (round(100 * sum(bool(record["correct"]) for record in scored) / len(scored), 1)
+                                  if scored else None),
                      "paper": None, "gap": None,
-                     "warnings": f"mean log p(gold) {sum(lps) / len(lps):.3f}" if lps else ""})
+                     "warnings": f"mean log p(gold) {sum(logprobs) / len(logprobs):.3f}" if logprobs else ""})
     return rows
 
 
 def main() -> None:
+    """Scan the folder, print the table and the unparsed files, and optionally write a CSV file."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", nargs="?", default=".")
     parser.add_argument("--csv", help="Also write the table to this CSV file.")
@@ -171,7 +184,7 @@ def main() -> None:
     rows, other = [], []
     skip = {".git", "__pycache__", "data", ".cache", "hf_cache"}
     for path in sorted(root.rglob("*")):
-        # Check only the part below root: the home folder itself is under /data on HPC3.
+        # The check reads only the part below root, because the home folder itself is under /data on HPC3.
         if not path.is_file() or any(part in skip for part in path.relative_to(root).parts):
             continue
         try:
@@ -190,16 +203,16 @@ def main() -> None:
                "n", "accuracy", "paper", "gap", "warnings", "file"]
     print("| " + " | ".join(columns) + " |")
     print("|" + "---|" * len(columns))
-    for r in rows:
-        print("| " + " | ".join("" if r[c] is None else str(r[c]) for c in columns) + " |")
+    for row in rows:
+        print("| " + " | ".join("" if row[column] is None else str(row[column]) for column in columns) + " |")
     print(f"\n{len(rows)} result rows found under {root}.")
     if other:
         print("Other result-like files (not parsed):")
-        for o in other:
-            print("  " + o)
+        for other_path in other:
+            print("  " + other_path)
     if args.csv:
-        with open(args.csv, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=columns)
+        with open(args.csv, "w", newline="") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=columns)
             writer.writeheader()
             writer.writerows(rows)
         print(f"Wrote {args.csv}")

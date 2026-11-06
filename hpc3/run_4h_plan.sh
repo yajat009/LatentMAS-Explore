@@ -47,6 +47,7 @@ run_arm() {  # $1 = run name, $2 = time limit, rest = run.py arguments
     echo "=== $(date +%T) end $name (exit $?)"
 }
 
+# These strings stay unquoted below, so that the shell splits them into separate run.py arguments.
 SEQ="--prompt sequential"
 LATENT="--method latent_mas --latent_steps 20 --think --generate_bs 1 $SEQ"
 
