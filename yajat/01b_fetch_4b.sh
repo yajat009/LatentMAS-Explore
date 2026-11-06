@@ -1,6 +1,6 @@
 #!/bin/bash
-# Minimal asset fetch for the Qwen3-4B / GSM8K reproduction slice.
-# Full 3-model, 8-dataset prefetch lives in 01_fetch_assets.sh.
+# Download only Qwen3-4B and GSM8K, which is all that the small reproduction needs.
+# 01_fetch_assets.sh downloads all 3 models and 8 datasets.
 set -euo pipefail
 export PYTHONNOUSERSITE=1
 export HF_HOME=/pub/$USER/hf

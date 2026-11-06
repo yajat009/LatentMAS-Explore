@@ -1,9 +1,9 @@
 #!/bin/bash
-# The paper's claim is COMPARATIVE (same accuracy, far fewer tokens, much faster),
-# so LatentMAS alone proves nothing. This submits all three arms on identical data.
+# Submit all three arms on the same data, because the paper's claim is a comparison:
+# the same accuracy with fewer tokens and less time. LatentMAS alone proves nothing.
 #
-# Defaults reproduce the released-log hyperparameters (think=1, max_new_tokens=4096,
-# temp 0.6, top_p 0.95, seed 42) on a GSM8K subset with Qwen3-4B.
+# The defaults reproduce the hyperparameters of the released logs (think=1, max_new_tokens=4096,
+# temperature 0.6, top_p 0.95, seed 42) on a GSM8K subset with Qwen3-4B.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -22,11 +22,11 @@ sub () {  # sub <method> <lsteps> <timelimit>
     yajat/run_latentmas.sbatch
 }
 
-# latent_mas: only the judger generates -> fastest
+# latent_mas is the fastest arm, because only the Judger generates text.
 sub latent_mas "$LSTEPS" 4:00:00
-# baseline: one generation, no agents
+# baseline runs one generation and no agents.
 sub baseline   0          4:00:00
-# text_mas: all four agents generate -> ~4x the wall clock
+# text_mas takes about 4 times the wall-clock time, because all four agents generate text.
 sub text_mas   0          8:00:00
 
 echo

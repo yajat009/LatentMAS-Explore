@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""Unit test for LatentMASMethod._truncate_past across cache representations.
+"""Test LatentMASMethod._truncate_past on every cache format, because no earlier run ever executed this function.
 
-_truncate_past is the one function in the repo that had never executed: it is
-reachable only from --sequential_info_only / --latent_only, which run.py did not
-define until now. It also used the transformers 4.x legacy Cache shim that 5.x
-removed. This pins the contract -- keep the LAST N positions -- on every cache
-shape the code claims to support, with no GPU and no model download.
+Only --sequential_info_only and --latent_only reach _truncate_past, and run.py did not define
+those flags in the past. The function also used the transformers 4.x legacy Cache shim, which 5.x
+removed. This test checks the contract, which is to keep the LAST N positions, on every cache
+format that the code supports. It needs no GPU and no model download.
 
     python yajat/test_truncate_past.py
 """
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,25 +22,27 @@ slice_ = LatentMASMethod._slice_tensor
 
 
 class _Dummy:
-    """Stand-in for a bound self; _truncate_past only needs _slice_tensor."""
+    """Stand in for a bound self, because _truncate_past needs only _slice_tensor."""
     _slice_tensor = staticmethod(slice_)
 
 
 D = _Dummy()
+# B = batch, H = heads, S = cached positions, HD = head dimension.
 B, H, S, HD = 2, 4, 12, 8
 KEEP = 5
 fails = []
 
 
-def check(name, cond):
+def check(name: str, cond: Any) -> None:
+    """Print PASS or FAIL for one check, and record the failures."""
     print(f"  {'PASS' if cond else 'FAIL'}  {name}")
     if not cond:
         fails.append(name)
 
 
-def make_tensor(offset=0):
-    # position p is filled with the value p so truncation is verifiable by value,
-    # not just by shape -- a slice from the wrong end still has the right shape.
+def make_tensor(offset: int = 0) -> torch.Tensor:
+    """Return a [batch, heads, positions, head_dim] tensor in which position p holds the value p + offset."""
+    # The test checks values and not only shapes, because a slice from the wrong end has the right shape.
     t = torch.zeros(B, H, S, HD)
     for p in range(S):
         t[:, :, p, :] = p + offset
@@ -68,7 +70,9 @@ print("key_cache/value_cache Cache (transformers 4.3x-4.5x)")
 
 
 class LegacyStyleCache:
-    def __init__(self, n):
+    """Imitate a transformers 4.3x-4.5x cache, which has parallel key and value lists."""
+
+    def __init__(self, n: int) -> None:
         self.key_cache = [make_tensor() for _ in range(n)]
         self.value_cache = [make_tensor(100) for _ in range(n)]
 

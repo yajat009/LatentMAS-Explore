@@ -1,10 +1,9 @@
 #!/usr/bin/env python
-"""Instrumented single-problem trace of the LatentMAS pipeline.
+"""Trace one problem through the LatentMAS pipeline, to show how the KV cache grows at each agent.
 
-run.py prints prompts and outputs, but not the thing that actually matters:
-the KV cache. This wraps ModelWrapper.generate_latent_batch /
-generate_text_batch and prints, per agent, how the cache grows and where the
-tokens do (and do not) get spent.
+run.py prints prompts and outputs, but not the KV (key/value) cache, which is the channel
+between the agents. This script wraps ModelWrapper.generate_latent_batch and generate_text_batch.
+For each agent, it prints how the cache grows and how many text tokens the agent writes.
 
 Usage:
   python yajat/trace_pipeline.py --method latent_mas --latent_steps 10
@@ -14,6 +13,7 @@ Usage:
 import argparse
 import os
 import sys
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,25 +28,28 @@ from data import load_gsm8k, load_mbppplus
 from utils import set_seed
 
 
-def hr(c="="):
+def hr(c: str = "=") -> None:
+    """Print a horizontal rule."""
     print(c * 78)
 
 
-def instrument(model: ModelWrapper):
-    """Wrap the two generation entry points to narrate cache state."""
+def instrument(model: ModelWrapper) -> Dict[str, int]:
+    """Wrap the two generation entry points, so that each call prints the cache state, and return the agent counter."""
     state = {"agent": 0}
 
     orig_latent = model.generate_latent_batch
     orig_text = model.generate_text_batch
 
-    def generate_latent_batch(input_ids, attention_mask=None, **kw):
+    def generate_latent_batch(input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None,
+                              **kw: Any) -> Any:
+        """Call the original method and print how one latent agent changed the cache."""
         state["agent"] += 1
         latent_steps = kw.get("latent_steps", 0)
         past_key_values = kw.get("past_key_values")
         n_prompt = int(attention_mask.sum(dim=1)[0].item()) if attention_mask is not None else input_ids.shape[1]
         before = _past_length(past_key_values)
-        # **kw and the tuple unpack keep this working on both the reproduction
-        # branch and fix/right-padding, where the function also returns its mask.
+        # **kw and the tuple unpack keep this code working on the reproduction branch and on
+        # fix/right-padding, where the function also returns its mask.
         ret = orig_latent(input_ids, attention_mask=attention_mask, **kw)
         past, mask = ret if isinstance(ret, tuple) else (ret, None)
         after = _past_length(past)
@@ -62,7 +65,9 @@ def instrument(model: ModelWrapper):
                   f"({100.0 * (total - real) / max(total, 1):.1f}% pad)")
         return ret
 
-    def generate_text_batch(input_ids, attention_mask=None, **kw):
+    def generate_text_batch(input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None,
+                            **kw: Any) -> Tuple[List[str], Any]:
+        """Call the original method and print what the text-writing agent read and wrote."""
         state["agent"] += 1
         past_kv = kw.get("past_key_values")
         inherited = _past_length(past_kv)
@@ -81,7 +86,8 @@ def instrument(model: ModelWrapper):
     return state
 
 
-def main():
+def main() -> None:
+    """Load the model, run one problem through the chosen method and print the trace."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", default="latent_mas", choices=["latent_mas", "text_mas", "baseline"])
     ap.add_argument("--model_name", default="Qwen/Qwen3-4B")
@@ -132,7 +138,7 @@ def main():
 
     instrument(model)
 
-    # narrate agent boundaries by patching the agent list iteration point
+    # Print the agent list first, so that the trace below is easy to follow.
     if hasattr(method, "agents"):
         for a in method.agents:
             print(f"  agent in pipeline: {a.name} ({a.role})")

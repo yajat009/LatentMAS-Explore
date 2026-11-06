@@ -1,19 +1,17 @@
 #!/usr/bin/env python
-"""Compare method arms on the prefix of problems ALL of them have finished.
+"""Compare method arms on the prefix of problems that all arms have finished, so that partial runs are usable.
 
-Why not yajat/analyze.py: that one parses a finished stdout log. These runs are
-preempted constantly, so a "finished log" is rare and a partial log is the normal
-case. The --checkpoint JSONL is written after every batch and already carries the
-full agent trace (`input_tokens` per agent, plus each agent's `output` text), so
-every number the paper compares on can be recovered from it *mid-run*.
+yajat/analyze.py parses a finished stdout log. These runs are often preempted, so most logs
+are partial. run.py writes the --checkpoint JSONL after every batch. That file carries the full
+agent trace (`input_tokens` and `output` for each agent), so this script can recover every
+number that the paper compares while a run is still going.
 
-The arms are only comparable over the same problems, so everything is reported on
-the common prefix -- run.py's resume is a prefix skip, so record i is problem i in
-every arm.
+Arms are comparable only on the same problems, so the script reports everything on the common
+prefix. run.py resumes by skipping a prefix, so record i is problem i in every arm.
 
-Wall-clock comes from `_elapsed_sec`, stamped on the last record of each batch and
-carried across preemption by run.py's resume. It is only meaningful if every arm
-ran on the same GPU model (all of these: L40S).
+Wall-clock time comes from `_elapsed_sec`. run.py stamps it on the last record of each batch and
+carries it across preemption. It is meaningful only if every arm ran on the same GPU model.
+All of these arms ran on L40S.
 
 Usage:
     python yajat/compare_arms.py                        # every mbppplus/4B arm
@@ -27,12 +25,13 @@ import json
 import os
 import re
 from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 ROLES = ["planner", "critic", "refiner", "judger", "singleagent"]
 
 
-def load(path):
-    """Records + the elapsed-seconds mark at each batch boundary."""
+def load(path: str) -> Tuple[List[Dict], List[Tuple[int, float]]]:
+    """Return the checkpoint records and the (records so far, elapsed seconds) mark of each batch."""
     recs, marks = [], []
     with io.open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -42,7 +41,7 @@ def load(path):
             try:
                 rec = json.loads(line)
             except ValueError:
-                break  # a preemption kill can truncate the final line
+                break  # A preemption kill can truncate the final line.
             el = rec.pop("_elapsed_sec", None)
             recs.append(rec)
             if el is not None:
@@ -50,10 +49,11 @@ def load(path):
     return recs, marks
 
 
-def agents_of(rec):
+def agents_of(rec: Dict) -> List[Dict]:
+    """Return the agent trace of a record, as a list of dicts."""
     a = rec.get("agents")
     if isinstance(a, str):
-        # older records round-tripped the trace through repr()
+        # Older records stored the trace as its repr() string.
         try:
             a = ast.literal_eval(a)
         except (ValueError, SyntaxError):
@@ -61,8 +61,8 @@ def agents_of(rec):
     return a or []
 
 
-def elapsed_at(marks, n):
-    """Wall-clock after the last completed batch that ends at or before n."""
+def elapsed_at(marks: List[Tuple[int, float]], n: int) -> Optional[Tuple[int, float]]:
+    """Return the mark of the last completed batch that ends at or before problem n, or None."""
     best = None
     for count, el in marks:
         if count <= n:
@@ -70,7 +70,8 @@ def elapsed_at(marks, n):
     return best
 
 
-def main():
+def main() -> None:
+    """Load all arms, compute their statistics on the common prefix, print them and write the JSON summary."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--glob", default="yajat/results/*mbppplus*.ckpt.jsonl")
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-4B")
@@ -119,18 +120,18 @@ def main():
                 for a in agents_of(r):
                     role = a.get("role", "?")
                     out = a.get("output") or ""
-                    # the latent agents emit no text at all -- that is the claim
+                    # The latent agents write no text, which is the paper's claim.
                     gen[role] += len(tok(out, add_special_tokens=False)["input_ids"]) if out else 0
                     lat[role] += a.get("latent_steps") or 0
-                    # `input_tokens` / `input_ids` are the token LISTS, not counts
+                    # `input_tokens` and `input_ids` are token lists, not counts.
                     ids = a.get("input_ids") or a.get("input_tokens") or []
                     prompt[role] += len(ids)
             row["gen_tokens_per_problem"] = {k: round(v / n, 1) for k, v in gen.items()}
             row["gen_tokens_total_per_problem"] = round(sum(gen.values()) / n, 1)
             row["prompt_tokens_per_problem"] = {k: round(v / n, 1) for k, v in prompt.items()}
             row["prompt_tokens_total_per_problem"] = round(sum(prompt.values()) / n, 1)
-            # latent steps are KV entries, not tokens: the paper's Token column
-            # never counts them, so track them as their own third currency.
+            # Latent steps are KV (key/value) cache entries, not tokens. The paper's Token
+            # column does not count them, so this script reports them separately.
             row["latent_steps_per_problem"] = round(sum(lat.values()) / n, 1)
         rows.append(row)
 

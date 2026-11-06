@@ -1,10 +1,9 @@
 #!/usr/bin/env python
-"""Extract accuracy + token accounting from a run.py stdout log.
+"""Extract accuracy and token counts from run.py stdout logs, because run.py itself reports no token counts.
 
-run.py's final JSON reports accuracy and wall clock but no token counts, and the
-paper's headline claim ("~50-80% fewer tokens") is a token claim. This recovers
-the missing half by re-tokenizing every agent's [Output] block with the model's
-own tokenizer.
+The final JSON of run.py reports accuracy and wall-clock time. The paper's main claim
+("~50-80% fewer tokens") is a claim about tokens. This script gets the token counts by
+tokenizing every agent's [Output] block again with the model's own tokenizer.
 
 Usage:
     python yajat/analyze.py yajat/results/*.log
@@ -14,14 +13,15 @@ import json
 import re
 import sys
 from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 PROBLEM_RE = re.compile(r"^={20} Problem #(\d+) ={20}$", re.M)
 AGENT_RE = re.compile(r"^----- Agent: (.+?) \((.+?)\) -----$", re.M)
 SEP = "-" * 46
 
 
-def parse_agent_block(block):
-    """block starts right after the agent header."""
+def parse_agent_block(block: str) -> Tuple[str, str, Optional[int]]:
+    """Return (prompt, output, latent steps) of one agent block, which starts right after the agent header."""
     out = ""
     inp = ""
     latent = None
@@ -29,7 +29,7 @@ def parse_agent_block(block):
         m = re.search(r"^\[Latent Steps\]\n(\d+)$", block, re.M)
         if m:
             latent = int(m.group(1))
-    # the prompt actually fed to the model, between [To Tokenize] and the next marker
+    # The prompt that the model read lies between [To Tokenize] and the next marker.
     m = re.search(r"^\[To Tokenize\]\n(.*?)(?=^\[Latent Steps\]$|^\[Output\]$)", block, re.S | re.M)
     if m:
         inp = m.group(1)
@@ -39,7 +39,8 @@ def parse_agent_block(block):
     return inp, out, latent
 
 
-def parse_log(path):
+def parse_log(path: str) -> Tuple[Optional[Dict], List[Dict]]:
+    """Return (final JSON summary or None, one dict per problem) for a run.py log."""
     text = open(path, encoding="utf-8", errors="replace").read()
 
     final = None
@@ -54,7 +55,7 @@ def parse_log(path):
 
     problems = []
     parts = PROBLEM_RE.split(text)
-    # parts = [preamble, idx, body, idx, body, ...]
+    # parts has the form [preamble, index, body, index, body, ...].
     for i in range(1, len(parts), 2):
         body = parts[i + 1]
         agents = []
@@ -72,7 +73,8 @@ def parse_log(path):
     return final, problems
 
 
-def main():
+def main() -> None:
+    """Parse each log, count tokens per role, print the tables and write the JSON summary."""
     ap = argparse.ArgumentParser()
     ap.add_argument("logs", nargs="+")
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-4B")

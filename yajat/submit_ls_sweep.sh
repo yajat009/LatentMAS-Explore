@@ -1,19 +1,19 @@
 #!/bin/bash
-# latent_steps sweep -- the experiment yajat/README.md calls the most informative
-# one available. Only ls=0 and ls=10 had been run, and accuracy falls 0.756 -> 0.378
-# between them. The sweep says whether that is monotonic (the latent channel is
-# actively harmful at 4B) or a cliff (something breaks at a specific length).
+# Submit the latent_steps sweep, which yajat/README.md calls the most informative experiment.
+# Earlier runs covered only ls=0 and ls=10 (ls = latent steps), and accuracy falls from 0.756 to
+# 0.378 between them. The sweep shows whether the fall is monotonic (the latent channel harms
+# accuracy at 4B) or a cliff (something breaks at a specific length).
 #
-# REALIGN=1 crosses it with --latent_space_realign, which had never been run at all.
-# Without that flag models.py sets the output->input map to identity, so an
-# output-space vector is fed back into an input-embedding slot; it is the leading
-# candidate explanation for the ls>0 collapse.
+# REALIGN=1 adds --latent_space_realign, which no earlier run used.
+# Without that flag, models.py sets the output-to-input map to the identity. The model then reads
+# an output-space vector as an input embedding. This is the main candidate explanation for the
+# collapse at ls>0.
 #
-# bs=1 deliberately: the right-padding artifact costs ~18 points at bs=15 and would
-# otherwise be confounded with latent_steps. This measures the channel, not the pad.
+# The batch size is 1, because the right-padding artifact costs about 18 points at bs=15 and would
+# mix with the effect of latent_steps. This sweep measures the channel, not the padding.
 #
-# Every job is pinned to L40S because every previously-measured arm was on L40S.
-# free-gpu32 caps at 4 GPUs, so these queue and drain a few at a time.
+# Every job runs on L40S, because every earlier arm ran on L40S.
+# free-gpu32 allows at most 4 GPUs, so the jobs queue and finish a few at a time.
 #
 # Usage:  ./yajat/submit_ls_sweep.sh          # both arms
 #         REALIGN_ONLY=1 ./yajat/submit_ls_sweep.sh

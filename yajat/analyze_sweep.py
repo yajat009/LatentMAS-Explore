@@ -1,21 +1,22 @@
 #!/usr/bin/env python
-"""Summarise the latent_steps sweep: accuracy as a function of the silent-thought
-budget, with and without --latent_space_realign.
+"""Summarize the latent_steps sweep, to show how accuracy depends on the number of latent steps.
 
-Answers the question yajat/README.md leaves open. Only ls=0 and ls=10 had ever
-been run, and accuracy falls from 0.756 to 0.378 between them. Two stories fit
-those two points and they imply opposite things:
+The script reports accuracy with and without --latent_space_realign.
 
-  monotonic decline -> the latent channel is actively harmful at this model size
+It answers the question that yajat/README.md leaves open. Earlier runs covered only ls=0 and
+ls=10 (ls = latent steps), and accuracy falls from 0.756 to 0.378 between them.
+Two explanations fit those two points, and they imply opposite things:
+
+  monotonic decline -> the latent channel harms accuracy at this model size
   a cliff           -> something breaks past a specific number of steps
 
-The realign arm tests the leading mechanical explanation for either. Without
---latent_space_realign, models.py sets the output->input map to the identity, so
-a hidden state from output space is fed back into an input-embedding slot with
-only a norm rescale. If that is the problem, the realign arm recovers.
+The realign arm tests the main mechanical explanation for either result. Without
+--latent_space_realign, models.py sets the output-to-input map to the identity. The model then
+reads a hidden state from output space as an input embedding, with only a norm rescale.
+If that is the problem, the realign arm recovers.
 
-Reads the per-arm checkpoint JSONLs, so it works mid-sweep -- reporting every
-arm on the common prefix of problems they have all finished.
+The script reads the checkpoint JSONL of each arm, so it works while the sweep runs.
+It reports every arm on the common prefix of problems that all arms have finished.
 
     python yajat/analyze_sweep.py
     python yajat/analyze_sweep.py --min-n 20     # include partial arms
@@ -34,7 +35,8 @@ PAT = re.compile(r"_ls(\d+)_bs(\d+)_think\d+(_realign)?$")
 MODEL_PAT = re.compile(r"_(Qwen3-[0-9]+B)_")
 
 
-def main():
+def main() -> None:
+    """Load the sweep checkpoints, print the table and the shape verdict, and write the JSON summary."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--glob", default="yajat/results/latent_mas_*_mbppplus_sequential_ls*_bs1_think1*.ckpt.jsonl")
     ap.add_argument("--out", default="yajat/results/ls_sweep.json")
@@ -64,10 +66,10 @@ def main():
     if not arms:
         raise SystemExit(f"no sweep checkpoints match {args.glob}")
 
-    # The default glob matches on ls/bs/think only, not model size. Two model
-    # sizes have wildly different accuracy at the same latent_steps (Finding
-    # "scale is the answer"), so silently mixing them into one "sweep" produces
-    # a nonsense shape verdict -- this bit the analysis once already.
+    # The default glob matches ls, bs and think, but not the model size. Two model sizes
+    # have different accuracy at the same latent_steps (see the finding
+    # "scale is the answer"). A sweep that mixes them gives a wrong shape verdict,
+    # and this happened once already.
     models = sorted(set(a["model"] for a in arms))
     if len(models) > 1:
         raise SystemExit(
@@ -96,9 +98,9 @@ def main():
         mark = elapsed_at(a["marks"], n)
         if mark:
             row["sec_per_problem"] = round(mark[1] / mark[0], 2)
-        # the judger is the only agent that emits text; its length is the cheapest
-        # signal for "did the model stop generating early", which is part of why
-        # the ls=10 arm looks cheap in the token column.
+        # The Judger is the only agent that writes text. Its length is the cheapest signal
+        # that the model stopped early, which partly explains why the ls=10 arm looks
+        # cheap in the token column.
         chars = [len(r.get("raw_prediction") or "") for r in pre]
         row["judger_chars_mean"] = round(sum(chars) / max(len(chars), 1), 1)
         row["empty_predictions"] = sum(1 for r in pre if not (r.get("prediction") or ""))
@@ -115,7 +117,7 @@ def main():
               f"{r.get('sec_per_problem', float('nan')):>8.1f} "
               f"{r['judger_chars_mean']:>13.0f} {r['empty_predictions']:>6}")
 
-    # Shape verdict, stated only when the sweep is dense enough to support one.
+    # The script states a shape verdict only when the sweep has enough points to support one.
     base = [r for r in rows if not r["realign"]]
     verdict = None
     if len(base) >= 4:

@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Measure what --pad_fix costs or buys, holding everything else fixed.
+"""Compare runs with and without --pad_fix, to measure the effect of the padding artifact alone.
 
-Both arms run the same problems, the same latent_steps, the same batch size and
-the same seed; the only difference is the three-part padding fix. Anything that
-moves is the padding artifact.
+Both arms use the same problems, latent_steps, batch size and seed.
+The only difference is the three-part padding fix, so any change comes from the padding artifact.
 
 Run the two arms first (see yajat/README.md), then:
 
@@ -14,17 +13,20 @@ import argparse
 import json
 import os
 import sys
+from typing import Any, Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compare_arms import load, agents_of  # noqa: E402
 
 
-def summarise(path, label):
+def summarise(path: str, label: str) -> Dict[str, Any]:
+    """Return the label, path, records and timing marks of one arm."""
     recs, marks = load(path)
     return {"label": label, "path": path, "recs": recs, "marks": marks}
 
 
-def main():
+def main() -> None:
+    """Load both arms, print their statistics on the common prefix and write the JSON summary."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--off", default="yajat/results/padfix_off.ckpt.jsonl")
     ap.add_argument("--on", default="yajat/results/padfix_on.ckpt.jsonl")
@@ -70,8 +72,8 @@ def main():
 
     delta = rows[1]["accuracy"] - rows[0]["accuracy"]
     print(f"delta (on - off): {delta:+.4f} accuracy over {n} problems")
-    # An empty-output count that only the fixed arm shows means the slice is wrong,
-    # not that the fix helped -- worth calling out rather than reporting as a win.
+    # If only the fixed arm has more empty outputs, the generation slice is wrong.
+    # The accuracy delta then says nothing about the fix, so the script warns.
     if rows[1]["empty_outputs"] > rows[0]["empty_outputs"]:
         print("WARNING: the fixed arm produced MORE empty outputs. Check the "
               "generation slice before believing the accuracy delta.")

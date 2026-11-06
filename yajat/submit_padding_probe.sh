@@ -1,21 +1,22 @@
 #!/bin/bash
-# FINDING #5: Qwen3's tokenizer_config.json sets no padding_side, so HF defaults to
-# RIGHT padding, and nothing in models.py overrides it. Under right padding every
-# sequence shorter than the batch max continues generating from a pad token rather
-# than from its real last prompt token.
+# Submit a padding probe, to measure the right-padding artifact (finding 5) before spending GPU-hours.
 #
-# It fails SILENTLY: generate_text_batch decodes with skip_special_tokens=True, so
-# the pads never appear in the output text.
+# Qwen3's tokenizer_config.json sets no padding_side, so Hugging Face defaults to right padding,
+# and models.py does not override it. Under right padding, every sequence shorter than the
+# batch maximum continues from a pad token and not from its last real prompt token.
 #
-# Do NOT "fix" this by setting padding_side="left" alone. generate_text_batch slices
+# The failure is silent. generate_text_batch decodes with skip_special_tokens=True, so the pads
+# never appear in the output text.
+#
+# Do not fix this by setting padding_side="left" alone. generate_text_batch slices
 #   sequences[idx, prompt_lengths[idx]:]
-# where prompt_lengths = attention_mask.sum(dim=1) -- correct ONLY under right
-# padding. Under left padding the generation starts at input_ids.shape[1] for every
-# row, so that slice would return prompt tail, not generation.
+# where prompt_lengths = attention_mask.sum(dim=1). That slice is correct only under right
+# padding. Under left padding, generation starts at input_ids.shape[1] for every row, so the
+# slice would return the end of the prompt and not the generated text.
 #
-# This probe quantifies the artifact before committing GPU-hours: same 30 samples,
-# same seed, bs=1 (no padding possible) vs bs=20 (heavy padding). A large gap means
-# batched numbers are not trustworthy and every arm must run at bs=1.
+# The probe runs the same 30 samples with the same seed at bs=1 (no padding) and at bs=20
+# (heavy padding). A large gap means that batched numbers are not reliable, and every arm must
+# run at bs=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

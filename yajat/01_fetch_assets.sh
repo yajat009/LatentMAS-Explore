@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-download models + datasets on the LOGIN node so GPU jobs never wait on network.
+# Download models and datasets on the login node, so that GPU jobs never wait for the network.
 set -euo pipefail
 export PYTHONNOUSERSITE=1
 export HF_HOME=/pub/$USER/hf

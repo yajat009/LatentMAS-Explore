@@ -1,20 +1,20 @@
 #!/usr/bin/env python
-"""Is --latent_space_realign actually doing anything?
+"""Measure how far the realignment matrix is from the identity, to show whether --latent_space_realign has any effect.
 
-The ls-sweep's realign arm is only worth running if the flag changes the
-computation. models.py builds M by least-squares-solving W_out @ M ~= W_in, then
-throws it away and substitutes the identity unless the flag is set:
+The realign arm of the latent_steps sweep is useful only if the flag changes the computation.
+models.py solves W_out @ M ~= W_in by least squares. Without the flag it discards M and uses
+the identity:
 
     if self.args.latent_space_realign:  pass
     else:                               realign_matrix = torch.eye(...)
 
-So this measures how far the solved M is from the identity it replaces, and what
-it does to a real hidden state. If M were near-identity the flag would be a no-op
-and the sweep would be pointless; if it is far from identity, then every run ever
-made without the flag has been feeding output-space vectors into an
-input-embedding slot, which is the leading explanation for the ls>0 collapse.
+This script measures how far M is from the identity, and what M does to realistic vectors.
+If M is near the identity, the flag does nothing and the sweep has no value.
+If M is far from the identity, every run without the flag fed output-space vectors into the
+input-embedding slot. That is the main candidate explanation for the collapse at ls>0
+(ls = latent steps).
 
-CPU-only and weights-only -- no GPU, no generation.
+The script reads only the weights. It needs no GPU and generates no text.
 
     python yajat/check_realign.py --model Qwen/Qwen3-4B
 """
@@ -22,14 +22,15 @@ import argparse
 import json
 import os
 import sys
+from typing import Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
 
-def _load_embeddings(model_name, tied):
-    """Read embed_tokens.weight and lm_head.weight without building the model."""
+def _load_embeddings(model_name: str, tied: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return (W_in, W_out), both [vocab, hidden], read from the weight files without building the model."""
     from huggingface_hub import snapshot_download
     from safetensors import safe_open
 
@@ -46,15 +47,16 @@ def _load_embeddings(model_name, tied):
         if len(found) == len(want):
             break
     W_in = found["model.embed_tokens.weight"]
-    # A tied model has no separate lm_head shard: the same matrix serves both, so
-    # W_out @ M ~= W_in becomes W @ M ~= W and the least-squares solve returns I.
+    # A tied model has no separate lm_head shard, because one matrix serves both roles.
+    # W_out @ M ~= W_in then becomes W @ M ~= W, and the least-squares solve returns I.
     W_out = W_in if tied else found.get("lm_head.weight")
     if W_out is None:
         raise SystemExit("lm_head.weight not found and the config says untied")
     return W_in, W_out
 
 
-def main():
+def main() -> None:
+    """Solve for M, print how far it is from the identity, and write the JSON result."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--out", default="yajat/results/realign_check.json")
@@ -67,12 +69,12 @@ def main():
     tied = bool(getattr(cfg, "tie_word_embeddings", False))
     print(f"{args.model}: tie_word_embeddings={tied}, hidden={cfg.hidden_size}")
 
-    # Only two tensors are needed, so pull them straight out of the safetensors
-    # shards instead of materialising a whole 14B model in fp32.
+    # The script needs only two tensors. It reads them from the safetensors shards,
+    # because loading a whole 14B model in fp32 costs too much memory.
     W_in, W_out = _load_embeddings(args.model, tied)
     print(f"W_in {tuple(W_in.shape)}  W_out {tuple(W_out.shape)}  tied={tied}")
 
-    # Exactly models.py:_build_latent_realign_matrix
+    # This is the computation of _build_latent_realign_matrix in models.py.
     gram = W_out.T @ W_out
     gram = gram + 1e-5 * torch.eye(gram.shape[0], dtype=gram.dtype)
     rhs = W_out.T @ W_in
@@ -91,9 +93,9 @@ def main():
         "M_offdiag_absmean": round(float((M - torch.diag(M.diagonal())).abs().mean()), 6),
     }
 
-    # What it does to realistic vectors: cosine between h and h@M.
+    # The cosine between h and h@M shows what M does to realistic vectors.
     torch.manual_seed(0)
-    h = W_out[torch.randint(0, W_out.shape[0], (256,))]  # real rows, realistic scale
+    h = W_out[torch.randint(0, W_out.shape[0], (256,))]  # [256, hidden]. Real rows have a realistic scale.
     hm = h @ M
     cos = torch.nn.functional.cosine_similarity(h, hm, dim=-1)
     res["cosine_h_vs_hM_mean"] = round(float(cos.mean()), 4)

@@ -1,12 +1,12 @@
 #!/bin/bash
-# Two minimal, reversible patches. Both are hard blockers for an HF-backend run.
+# Apply two small, reversible patches, because each one otherwise stops a run on the HF (Hugging Face) backend.
 # Revert with: git -C .. checkout architecture/methods/latent_mas.py architecture/run.py
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# (1) architecture/methods/latent_mas.py imports vllm unconditionally, so --method latent_mas
-#     crashes on ImportError even though the paper says to use the HF backend for
-#     official numbers, and requirements.txt does not list vllm.
+# (1) architecture/methods/latent_mas.py always imports vllm, so --method latent_mas crashes
+#     with ImportError. The paper says to use the HF backend for official numbers, and
+#     requirements.txt does not list vllm.
 if grep -q '^from vllm import SamplingParams$' architecture/methods/latent_mas.py; then
   python - <<'PY'
 import re, pathlib
